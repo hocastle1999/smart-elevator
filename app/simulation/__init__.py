@@ -5,7 +5,9 @@ from app.simulation.config import ElevatorConfig
 from app.simulation.dispatch import (
     STRATEGIES,
     CallRequest,
+    DestinationDispatch,
     DispatchStrategy,
+    EtaCost,
     NearestCar,
 )
 from app.simulation.elevator import Elevator, StateChange
@@ -19,11 +21,13 @@ __all__ = [
     "Building",
     "CallRequest",
     "CarCall",
+    "DestinationDispatch",
     "Direction",
     "DispatchStrategy",
     "Elevator",
     "ElevatorConfig",
     "ElevatorState",
+    "EtaCost",
     "HallCall",
     "NearestCar",
     "Passenger",
