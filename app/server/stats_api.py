@@ -81,6 +81,23 @@ def busiest_floors(run_id: int, request: Request) -> list[stats.FloorRank]:
         return stats.busiest_floors(conn, run_id)
 
 
+@dataclass(frozen=True)
+class ServiceReport:
+    availability: list[stats.CarAvailability]
+    incidents: list[stats.Incident]
+
+
+@router.get("/runs/{run_id}/service", response_model=ServiceReport)
+def service_report(run_id: int, request: Request) -> ServiceReport:
+    """카별 가동률과 평균 복구 시간, 고장별 감지까지 걸린 시간 (점검 관리)."""
+    with _engine(request).connect() as conn:
+        run = _require_run(conn, run_id)
+        return ServiceReport(
+            availability=stats.car_availability(conn, run),
+            incidents=stats.incidents(conn, run_id),
+        )
+
+
 @router.get("/compare", response_model=list[stats.StrategyComparison])
 def compare(request: Request) -> list[stats.StrategyComparison]:
     """저장된 실험 실행을 (패턴, 부하, 전략)별로 묶어 비교한다."""

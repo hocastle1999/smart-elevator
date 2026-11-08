@@ -314,3 +314,112 @@ def busiest_floors(conn: Connection, run_id: int) -> list[FloorRank]:
         )
         for row in conn.execute(FLOORS_SQL, {"run_id": run_id}).mappings()
     ]
+
+
+# ---------------------------------------------------------------------- 가동률과 장애 (6단계)
+
+
+@dataclass(frozen=True)
+class CarAvailability:
+    car: int
+    outages: int  # 운행 중지 횟수 (고장 격리, 점검)
+    down_s: float
+    availability_pct: float  # 실행 시간 중 운행 중이던 비율
+    mean_outage_s: float | None  # 운행 중지 한 번의 평균 길이 (평균 복구 시간, MTTR)
+
+
+# 운행 중지 구간 = OUT_OF_SERVICE 기록부터 같은 카의 다음 RETURN 기록까지.
+# 두 종류만 남기고 LEAD로 "다음 기록의 시각"을 붙이면, OUT_OF_SERVICE 행의 다음 행이 곧 복귀다.
+# 아직 복귀하지 않았으면(다음 행 없음) 실행의 마지막 시각까지로 본다.
+AVAILABILITY_SQL = text("""
+    WITH marks AS (
+        SELECT s.car, s.kind, s.time_ms,
+               LEAD(s.time_ms) OVER (PARTITION BY s.car ORDER BY s.seq) AS next_ms
+        FROM service_log s
+        WHERE s.run_id = :run_id AND s.kind IN ('OUT_OF_SERVICE', 'RETURN')
+    )
+    SELECT m.car, COUNT(*) AS outages,
+           SUM(COALESCE(m.next_ms, r.sim_ms) - m.time_ms) AS down_ms
+    FROM marks m
+    JOIN simulation_runs r ON r.id = :run_id
+    WHERE m.kind = 'OUT_OF_SERVICE'
+    GROUP BY m.car
+""")
+
+
+def car_availability(conn: Connection, run: RunInfo) -> list[CarAvailability]:
+    rows = {r["car"]: r for r in conn.execute(AVAILABILITY_SQL, {"run_id": run.id}).mappings()}
+    result = []
+    for car in range(run.num_elevators):  # 한 번도 멈추지 않은 카도 100%로 보여 준다
+        row = rows.get(car)
+        outages = row["outages"] if row else 0
+        down_ms = int(row["down_ms"]) if row else 0
+        pct = 100.0 if run.sim_ms == 0 else 100 * (1 - down_ms / run.sim_ms)
+        result.append(
+            CarAvailability(
+                car=car,
+                outages=outages,
+                down_s=round(down_ms / 1000, 1),
+                availability_pct=round(pct, 2),
+                mean_outage_s=round(down_ms / outages / 1000, 1) if outages else None,
+            )
+        )
+    return result
+
+
+@dataclass(frozen=True)
+class Incident:
+    car: int
+    fault: str
+    fault_s: float  # 고장이 난 시각 (시뮬레이션, 초)
+    first_rule: str | None  # 처음 울린 감지 규칙
+    detected_after_s: float | None  # 고장부터 감지까지 (None이면 감지하지 못함)
+    isolated_after_s: float | None  # 고장부터 운행 중지까지
+    repaired_after_s: float | None  # 고장부터 수리까지
+
+
+# 고장 하나에 뒤따르는 감지, 운행 중지, 수리 기록을 한 묶음(사건)으로 모은다.
+# "섬 나누기(gaps and islands)": 카별로 시간순 누적 합 SUM(kind = 'FAULT')을 구하면 고장이 날
+# 때마다 1씩 오르므로, 같은 값을 가진 행들이 한 사건이 된다. (0은 첫 고장 전의 기록)
+INCIDENTS_SQL = text("""
+    WITH numbered AS (
+        SELECT car, seq, time_ms, kind, detail,
+               SUM(kind = 'FAULT') OVER (PARTITION BY car ORDER BY seq) AS incident
+        FROM service_log
+        WHERE run_id = :run_id
+    )
+    SELECT car, incident,
+           MAX(CASE WHEN kind = 'FAULT' THEN detail END) AS fault,
+           MIN(CASE WHEN kind = 'FAULT' THEN time_ms END) AS fault_ms,
+           MIN(CASE WHEN kind = 'ALERT' THEN time_ms END) AS alert_ms,
+           SUBSTRING_INDEX(
+               GROUP_CONCAT(CASE WHEN kind = 'ALERT' THEN detail END ORDER BY seq), ',', 1
+           ) AS first_rule,
+           MIN(CASE WHEN kind = 'OUT_OF_SERVICE' THEN time_ms END) AS isolated_ms,
+           MIN(CASE WHEN kind = 'REPAIR' THEN time_ms END) AS repaired_ms
+    FROM numbered
+    WHERE incident > 0
+    GROUP BY car, incident
+    ORDER BY fault_ms, car
+""")
+
+
+def incidents(conn: Connection, run_id: int) -> list[Incident]:
+    def after(ms: int | None, start: int) -> float | None:
+        return None if ms is None else round((ms - start) / 1000, 1)
+
+    result = []
+    for row in conn.execute(INCIDENTS_SQL, {"run_id": run_id}).mappings():
+        start = row["fault_ms"]
+        result.append(
+            Incident(
+                car=row["car"],
+                fault=row["fault"],
+                fault_s=round(start / 1000, 1),
+                first_rule=row["first_rule"],
+                detected_after_s=after(row["alert_ms"], start),
+                isolated_after_s=after(row["isolated_ms"], start),
+                repaired_after_s=after(row["repaired_ms"], start),
+            )
+        )
+    return result

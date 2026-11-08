@@ -21,6 +21,7 @@ from sqlalchemy import (
 )
 
 from app.simulation import Direction, ElevatorState
+from app.simulation.monitor import ServiceKind, Severity
 
 # 제약과 인덱스 이름 규칙. 이름이 정해져 있어야 마이그레이션에서 지우거나 바꿀 수 있다.
 metadata = MetaData(
@@ -111,4 +112,26 @@ passenger_trips = Table(
     # (run_id, wait_ms) 인덱스는 두지 않는다. 백분위수를 구하는 윈도 함수는 인덱스 순서로 읽어도
     # MySQL 8.0이 항상 다시 정렬해서 이득이 없고, 쓰기 비용만 는다 (docs/troubleshooting.md).
     # 실행별 조회는 기본키 (run_id, passenger_id)의 앞부분으로 찾는다.
+)
+
+service_log = Table(
+    "service_log",
+    metadata,
+    # 고장 주입, 이상 감지, 운행 중지, 점검 요청, 수리, 복귀를 시간순으로 한 줄씩 (6단계).
+    # 실행 안에서의 순번(seq)이 기본키라 실시간 저장을 다시 시도해도 중복되지 않는다.
+    Column(
+        "run_id",
+        BigInteger,
+        ForeignKey("simulation_runs.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("seq", Integer, primary_key=True, autoincrement=False),
+    Column("time_ms", BigInteger, nullable=False),
+    Column("car", SmallInteger, nullable=False),
+    Column("kind", String(24), nullable=False),
+    Column("detail", String(32), nullable=False, server_default=""),
+    Column("severity", String(8)),
+    Column("message", String(200), nullable=False, server_default=""),
+    CheckConstraint(_in("kind", [k.value for k in ServiceKind]), name="kind"),
+    CheckConstraint(_in("severity", [s.value for s in Severity]), name="severity"),
 )
