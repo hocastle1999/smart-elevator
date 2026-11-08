@@ -1,0 +1,47 @@
+# CLAUDE.md
+
+스마트 엘리베이터: 배차 알고리즘 시뮬레이터와 운행 모니터링. 백엔드 포트폴리오용 프로젝트(2번째).
+1번 프로젝트(reservation-api)가 트랜잭션과 락 중심이라면, 이 프로젝트는 실시간 처리, 상태 머신,
+스케줄링 알고리즘, 데이터 분석을 보여 준다. 하드웨어 없이 서버 안의 시뮬레이션으로만 만든다.
+
+## 목적과 작업 방식
+- 사용자가 면접에서 모든 코드를 설명할 수 있어야 한다.
+  - 새 개념을 도입할 때는 왜 그렇게 하는지, 다른 방법과 비교해 짧게 설명한다.
+  - 기능 단위로 작게 나눠 진행하고 커밋도 그 단위로 나눈다.
+- 실제로 겪은 문제는 `docs/troubleshooting.md`에 문제, 원인, 해결, 배운 점으로 남긴다.
+- 설계 결정은 `docs/design.md`를 갱신한다. 상태나 전이를 바꾸면 Mermaid 다이어그램도 고친다.
+- 진행 단계는 README "로드맵"을 따른다. 현재 1단계(단일 엘리베이터 엔진) 완료.
+- 사용자와의 대화와 문서는 한국어로 작성한다. 코드 식별자는 영어, 주석은 한국어로 쓴다.
+
+## 기술 스택
+- Python 3.11 (`.python-version`)
+- 엔진은 표준 라이브러리만 쓴다. FastAPI, uvicorn은 3단계(실시간 서버)부터 쓴다.
+- pytest, ruff, GitHub Actions
+
+## 명령어 (Windows PowerShell, 프로젝트 루트 기준)
+- 가상환경 Python: `.\.venv\Scripts\python.exe`
+- 의존성 설치: `.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt`
+- 테스트: `.\.venv\Scripts\python.exe -m pytest -q`
+- 린트/포맷: `.\.venv\Scripts\ruff.exe check .` / `.\.venv\Scripts\ruff.exe format .`
+- 커밋 전에는 테스트, 린트, 포맷 검사를 모두 통과시킨다. CI(`.github/workflows/ci.yml`)도 같은 검사를 한다.
+
+## 구조
+- `app/simulation/`: 시뮬레이션 엔진. 순수 파이썬.
+  - I/O, asyncio, 실제 시계(`time.time`), 전역 `random`을 쓰지 않는다. 같은 입력이면 항상 같은 결과가 나와야 한다(결정성). 4단계 알고리즘 비교가 여기에 기댄다.
+  - `types.py`: `Direction`, `ElevatorState`, `HallCall`, `CarCall`
+  - `building.py`: `Building` (층은 1층부터 `num_floors`층까지), 호출 검증
+  - `config.py`: `ElevatorConfig` (이동, 문 시간. 모두 정수 ms)
+  - `elevator.py`: `Elevator` 상태 머신 (LOOK). 상태 전이는 `_complete_phase`(시간 경과)와 `_on_new_call`(호출 입력) 두 곳에서만 시작된다.
+  - `simulation.py`: `Simulation` (예약된 호출을 정확한 시각에 넣으며 시간 진행)
+  - `traffic.py`: 무작위 호출 발생기. 무작위성은 이 파일에만 있고 `random.Random(seed)`를 쓴다.
+- `tests/`: pytest. 공용 도우미(`stops`, `run_until_idle`, 시간 상수)는 `tests/helpers.py`.
+- `docs/design.md`: 상태 머신 다이어그램과 설계 결정
+
+## 규칙
+- 시간은 정수 밀리초다. `float` 시간을 도입하지 않는다(부동소수점 오차로 tick 크기에 따라 결과가 달라짐).
+- `tick(dt)` 결과는 tick 크기와 무관해야 한다. 시간 처리 코드를 바꾸면 `test_large_tick_equals_many_small_ticks`, `test_result_does_not_depend_on_tick_size`가 통과하는지 본다.
+- 판단 로직이 `set` 순회 순서에 기대면 안 된다(홀 호출 해시는 실행마다 다를 수 있음). 방향은 `(UP, DOWN)` 같은 고정 순서로 확인한다.
+- 새 상태 전이를 추가하면 그 전이를 직접 일으키는 테스트를 함께 쓴다.
+- 비밀 정보는 `.env`에만 둔다. 코드, 문서, 커밋에 넣지 않는다.
+- 의존성을 추가하면 버전을 고정해 `requirements.txt`(실행용) 또는 `requirements-dev.txt`(개발용)에 적는다.
+- 커밋 메시지는 `feat: ...`, `fix: ...`, `docs: ...`, `test: ...`, `chore: ...` 형식, 내용은 한국어.
