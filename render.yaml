@@ -1,0 +1,23 @@
+# Render Blueprint: 공개 데모 (공유 시뮬레이션 하나). 자세한 이유는 README "배포".
+services:
+  - type: web
+    name: smart-elevator
+    runtime: python  # 버전은 .python-version(3.11)을 따른다 (Render 기본값은 3.14)
+    plan: free
+    region: singapore  # 한국에서 가장 가까운 지역
+    branch: main
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    # 프로세스(워커) 1개: 시뮬레이션이 메모리에 하나뿐이라, 여러 개 띄우면 접속자마다 다른 건물을 본다.
+    # --no-proxy-headers: X-Forwarded-For는 앱이 SIM_TRUSTED_PROXY_HOPS로 직접 해석한다 (위조 방지).
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --no-proxy-headers
+    healthCheckPath: /health
+    envVars:
+      - key: SIM_TRUSTED_PROXY_HOPS
+        value: "1"
+      # DB 없이 시작한다 (기록과 통계 API만 빠짐). 붙이려면 DB_* 값을 대시보드에서 넣는다.
+      - key: DB_ENABLED
+        value: "false"
+      # 관리 API(고장 주입, 점검) 토큰. Render가 무작위 값을 만들고, 대시보드에서 볼 수 있다.
+      - key: ADMIN_TOKEN
+        generateValue: true

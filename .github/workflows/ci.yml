@@ -54,3 +54,12 @@ jobs:
 
       - name: Test
         run: pytest -q
+
+      # 배포와 같은 시작 명령으로 서버를 띄워, 실제로 요청을 받는지 확인한다 (DB 없이).
+      - name: Smoke test (server starts)
+        run: |
+          uvicorn app.main:app --port 8000 --no-proxy-headers &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8000/health | grep -q '"status":"ok"'
+          curl -fsS http://127.0.0.1:8000/api/state > /dev/null
+          curl -fsS http://127.0.0.1:8000/ | grep -q "Smart Elevator"
