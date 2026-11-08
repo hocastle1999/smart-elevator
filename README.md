@@ -20,7 +20,7 @@
 | 3 | 실시간 서버: asyncio 시뮬레이션 루프, REST로 호출, WebSocket 상태 방송, 간단한 화면 한 페이지 | ✅ 완료 |
 | 4 | 배차 알고리즘 2~3개(Nearest Car, 방향 일치·도착 예상시간 비용 기반, 목적층 예약 방식)와 교통 패턴(출근 상향 피크, 점심, 퇴근 하향 피크, 포아송 도착) 실험. 같은 시드로 평균·p95 대기시간과 이동 거리를 비교한 문서 | ✅ 완료 |
 | 5 | 운행 이벤트를 MySQL에 저장하고 통계 API 제공 (윈도우 함수 등 SQL 분석) | ✅ 완료 |
-| 6 | 고장 주입과 이상 감지 규칙, 점검 관리 | 예정 |
+| 6 | 고장 주입과 이상 감지 규칙, 점검 관리 | ✅ 완료 |
 | 7 | 배포 | 예정 |
 
 공개 데모의 시뮬레이션은 **모든 방문자가 하나를 공유**합니다 (3단계에서 결정, 이유는 docs/design.md 5절).
@@ -102,6 +102,21 @@ print([(a.time_ms, a.call.floor, a.car) for a in sim.assignments])
 | `GET /api/stats/runs/{id}/floors` | 출발 승객이 많은 층 순위 |
 | `GET /api/stats/compare` | 저장된 실험의 전략 비교 |
 
+## 6단계: 고장, 이상 감지, 점검 관리
+
+- **고장 주입**: 문 센서 이상(닫힐 때마다 다시 열림), 층 사이 멈춤(이동 중으로 보이지만 멈춤), 모터 저하(이동 2배). 카는 고장을 알리지 않으므로 시스템이 **동작을 보고** 알아채야 합니다.
+- **이상 감지 규칙**: 출발 없이 연속 재열림 10번, 다음 층까지 정상 시간의 3배, 느린 구간 연속 3번. 문 재열림 임계값은 저장된 정상 운행 기록 31만 행을 SQL로 분석해 정했습니다(정상 최대 6번).
+- **자동 격리**: 심각한 이상이면 그 카를 운행에서 빼고(`OUT_OF_SERVICE`) 맡던 호출을 다른 카에 넘깁니다. 점검 요청은 태운 승객을 내려놓은 뒤 멈춥니다.
+- **점검 관리**: 고장, 감지, 운행 중지, 수리, 복귀를 기록하고 SQL로 카별 가동률, 평균 복구 시간, 고장별 감지까지 걸린 시간을 냅니다(`GET /api/stats/runs/{id}/service`).
+- 관리 API(고장 주입, 수리, 점검, 복귀)는 `ADMIN_TOKEN`을 설정했을 때만 열립니다.
+
+[고장 시나리오 실험](docs/experiments.md) (4대 중 1대 고장, 15분 뒤 수리):
+
+| 고장 | 3분 넘게 기다린 승객: 감지 끔 → 켬 | 최대 대기 | 감지까지 |
+|---|---|---|---|
+| 층 사이 멈춤 | 111명 → **0명** | 954초 → 136초 | 7.2초 |
+| 문 센서 | 67명 → **0명** | 678초 → 154초 | 55.7초 |
+
 ## 실행 방법
 
 Windows PowerShell, 프로젝트 루트 기준입니다. Python 3.11이 필요합니다.
@@ -143,12 +158,13 @@ py -3.11 -m venv .venv
 | `SIM_CALLS_PER_WINDOW` | 10 | 접속자별 호출 허용 횟수 |
 | `SIM_RATE_WINDOW_MS` | 10000 | 위 횟수를 세는 기간 |
 | `SIM_RECORD_FLUSH_MS` | 5000 | 운행 기록을 DB에 묶어서 저장하는 간격 |
+| `ADMIN_TOKEN` | (없음) | 관리 API 토큰. 비워 두면 관리 API는 403. 요청 헤더 `X-Admin-Token`으로 보낸다 |
 | `DB_ENABLED` | false | 운행 기록 저장과 통계 API 사용 (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`는 .env.example 참고) |
 
 GitHub Actions가 push와 PR마다 같은 검사(ruff check, ruff format --check, pytest)를 실행합니다.
 
 ## 문서
 
-- [docs/design.md](docs/design.md): 상태 머신 다이어그램, LOOK과 SCAN·FCFS 비교, 시간 처리와 결정성, 배차 전략과 Nearest Car, 실시간 서버(공유 방식, 동시성, 방송), 승객 모델과 사건 단위 시간 진행, 운행 기록 테이블과 윈도 함수 통계
-- [docs/experiments.md](docs/experiments.md): 배차 전략 비교 실험 결과와 분석
+- [docs/design.md](docs/design.md): 상태 머신 다이어그램, LOOK과 SCAN·FCFS 비교, 시간 처리와 결정성, 배차 전략과 Nearest Car, 실시간 서버(공유 방식, 동시성, 방송), 승객 모델과 사건 단위 시간 진행, 운행 기록 테이블과 윈도 함수 통계, 고장·감지·점검
+- [docs/experiments.md](docs/experiments.md): 배차 전략 비교 실험, 고장 시나리오 실험
 - [docs/troubleshooting.md](docs/troubleshooting.md): 개발 중 겪은 문제와 해결 기록
