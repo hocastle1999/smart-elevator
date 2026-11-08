@@ -335,6 +335,14 @@ class Elevator:
             self.state = state
             self._record()
 
+    def drain_history(self) -> list[StateChange]:
+        """지금까지의 상태 변화 기록을 꺼내고 비운다.
+
+        오래 도는 실시간 서버에서 기록이 메모리에 끝없이 쌓이지 않게, 꺼내서 DB에 저장하거나 버린다.
+        """
+        drained, self.history = self.history, []
+        return drained
+
     def _record(self) -> None:
         change = StateChange(self.now_ms, self.state, self.floor, self.direction)
         self.history.append(change)

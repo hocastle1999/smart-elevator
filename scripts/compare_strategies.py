@@ -7,6 +7,7 @@
     .\\.venv\\Scripts\\python.exe -m scripts.compare_strategies
     .\\.venv\\Scripts\\python.exe -m scripts.compare_strategies --rates 10 20 --seeds 3
 
+--save를 주면 실행마다 MySQL에 저장한다(GET /api/stats/compare로 같은 표를 SQL로 다시 낼 수 있다).
 결과는 Markdown 표로 출력한다. docs/experiments.md에 정리한다.
 """
 
@@ -14,6 +15,10 @@ import argparse
 import time
 from dataclasses import dataclass
 
+from sqlalchemy import Engine
+
+from app.db.config import DatabaseSettings, create_db_engine
+from app.db.recorder import save_run
 from app.simulation import STRATEGIES, Building, Passenger, Simulation
 from app.simulation.passengers import percentile
 from app.simulation.traffic import PATTERNS, poisson_passengers
@@ -28,7 +33,14 @@ class Result:
 
 
 def run(
-    strategy: str, pattern: str, rate: float, seeds: list[int], floors: int, cars: int, minutes: int
+    strategy: str,
+    pattern: str,
+    rate: float,
+    seeds: list[int],
+    floors: int,
+    cars: int,
+    minutes: int,
+    engine: Engine | None = None,
 ) -> Result:
     building = Building(num_floors=floors)
     result = Result([], 0, 0, 0)
@@ -37,6 +49,8 @@ def run(
         sim = Simulation(building, num_elevators=cars, strategy=STRATEGIES[strategy]())
         sim.schedule_all(arrivals)
         sim.run_until_idle()  # 마지막 승객까지 내려야 끝난다
+        if engine is not None:
+            save_run(engine, sim, pattern=pattern, rate_per_min=rate, seed=seed)
         stats = sim.stats()
         result.passengers += sim.passengers
         result.floors_traveled += stats.floors_traveled
@@ -67,7 +81,17 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, default=5)
     parser.add_argument("--rates", type=float, nargs="+", default=[10, 20, 30], help="분당 승객")
     parser.add_argument("--output", help="결과를 UTF-8 Markdown 파일로 저장 (없으면 화면 출력)")
+    parser.add_argument(
+        "--save", action="store_true", help="실행마다 MySQL에 저장 (.env의 DB_ENABLED=true 필요)"
+    )
     args = parser.parse_args()
+
+    engine = None
+    if args.save:
+        db_settings = DatabaseSettings()
+        if not db_settings.db_enabled:
+            parser.error("--save는 .env에 DB_ENABLED=true가 있어야 합니다.")
+        engine = create_db_engine(db_settings)
 
     seeds = list(range(args.seeds))
     started = time.perf_counter()
@@ -86,7 +110,9 @@ def main() -> None:
                 "|---|---:|---:|---:|---:|---:|---:|",
             ]
             for strategy in STRATEGIES:
-                result = run(strategy, pattern, rate, seeds, args.floors, args.cars, args.minutes)
+                result = run(
+                    strategy, pattern, rate, seeds, args.floors, args.cars, args.minutes, engine
+                )
                 lines.append(row(strategy, result))
             lines.append("")
     text = "\n".join(lines)
