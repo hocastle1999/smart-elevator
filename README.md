@@ -17,13 +17,13 @@
 |---|---|---|
 | 1 | 단일 엘리베이터 상태 머신 엔진 (LOOK 방식, 결정적 시뮬레이션) | ✅ 완료 |
 | 2 | 여러 대 + 배차 전략 인터페이스(Strategy 패턴) + 가장 가까운 차(Nearest Car) | ✅ 완료 |
-| 3 | 실시간 서버: asyncio 시뮬레이션 루프, REST로 호출, WebSocket 상태 방송, 간단한 화면 한 페이지 | 예정 |
+| 3 | 실시간 서버: asyncio 시뮬레이션 루프, REST로 호출, WebSocket 상태 방송, 간단한 화면 한 페이지 | ✅ 완료 |
 | 4 | 배차 알고리즘 2~3개(Nearest Car, 방향 일치·도착 예상시간 비용 기반, 목적층 예약 방식)와 교통 패턴(출근 상향 피크, 점심, 퇴근 하향 피크, 포아송 도착) 실험. 같은 시드로 평균·p95 대기시간과 이동 거리를 비교한 문서 | 예정 |
 | 5 | 운행 이벤트를 MySQL에 저장하고 통계 API 제공 (윈도우 함수 등 SQL 분석) | 예정 |
 | 6 | 고장 주입과 이상 감지 규칙, 점검 관리 | 예정 |
 | 7 | 배포 | 예정 |
 
-3단계에서 정할 것: 공개 데모에서 방문자마다 시뮬레이션을 따로 둘지, 하나를 공유할지(자원 제한 포함).
+공개 데모의 시뮬레이션은 **모든 방문자가 하나를 공유**합니다 (3단계에서 결정, 이유는 docs/design.md 5절).
 
 ## 1단계: 시뮬레이션 엔진
 
@@ -61,6 +61,14 @@ sim.run_until(60_000)
 print([(a.time_ms, a.call.floor, a.car) for a in sim.assignments])
 ```
 
+## 3단계: 실시간 서버
+
+- asyncio 루프 하나가 공유 시뮬레이션을 100ms마다 진행하고, WebSocket(`/ws`)으로 모든 접속자에게 상태를 방송합니다.
+- REST로 호출합니다: `POST /api/hall-calls`(배차된 카 번호를 돌려줌), `POST /api/elevators/{car}/car-calls`.
+- **락 없이 안전**: 루프와 핸들러가 같은 이벤트 루프 스레드에서 돌고, 그 사이에 `await`가 없어 서로 끼어들지 않습니다. 그래서 핸들러는 모두 `async def`입니다.
+- **느린 접속자 격리**: 접속자마다 최신 상태 1개만 담는 큐를 둬서, 한 명이 느려도 루프와 다른 접속자는 기다리지 않습니다.
+- **공유 데모 보호**: 접속자(IP)별 호출 빈도 제한(429 + `Retry-After`), 동시 접속 상한(넘으면 1013으로 닫음).
+
 ## 실행 방법
 
 Windows PowerShell, 프로젝트 루트 기준입니다. Python 3.11이 필요합니다.
@@ -75,11 +83,26 @@ py -3.11 -m venv .venv
 # 린트, 포맷 검사
 .\.venv\Scripts\ruff.exe check .
 .\.venv\Scripts\ruff.exe format --check .
+
+# 서버 실행 후 브라우저에서 http://localhost:8000 (API 문서: /docs)
+.\.venv\Scripts\python.exe -m uvicorn app.main:app
 ```
+
+서버 설정은 환경 변수로 바꿉니다.
+
+| 환경 변수 | 기본값 | 설명 |
+|---|---|---|
+| `SIM_NUM_FLOORS` | 10 | 층 수 |
+| `SIM_NUM_ELEVATORS` | 3 | 카 대수 |
+| `SIM_TICK_MS` | 100 | 실제 시간으로 몇 ms마다 진행할지 |
+| `SIM_SIM_MS_PER_TICK` | 100 | tick 한 번에 진행할 시뮬레이션 시간 (200이면 2배속) |
+| `SIM_MAX_CONNECTIONS` | 100 | WebSocket 동시 접속 상한 |
+| `SIM_CALLS_PER_WINDOW` | 10 | 접속자별 호출 허용 횟수 |
+| `SIM_RATE_WINDOW_MS` | 10000 | 위 횟수를 세는 기간 |
 
 GitHub Actions가 push와 PR마다 같은 검사(ruff check, ruff format --check, pytest)를 실행합니다.
 
 ## 문서
 
-- [docs/design.md](docs/design.md): 상태 머신 다이어그램, LOOK과 SCAN·FCFS 비교, 시간 처리와 결정성, 배차 전략과 Nearest Car
+- [docs/design.md](docs/design.md): 상태 머신 다이어그램, LOOK과 SCAN·FCFS 비교, 시간 처리와 결정성, 배차 전략과 Nearest Car, 실시간 서버(공유 방식, 동시성, 방송)
 - [docs/troubleshooting.md](docs/troubleshooting.md): 개발 중 겪은 문제와 해결 기록

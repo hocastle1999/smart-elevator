@@ -10,18 +10,20 @@
   - 기능 단위로 작게 나눠 진행하고 커밋도 그 단위로 나눈다.
 - 실제로 겪은 문제는 `docs/troubleshooting.md`에 문제, 원인, 해결, 배운 점으로 남긴다.
 - 설계 결정은 `docs/design.md`를 갱신한다. 상태나 전이를 바꾸면 Mermaid 다이어그램도 고친다.
-- 진행 단계는 README "로드맵"을 따른다. 현재 2단계(여러 대 + 배차 전략)까지 완료.
+- 진행 단계는 README "로드맵"을 따른다. 현재 3단계(실시간 서버)까지 완료.
 - 사용자와의 대화와 문서는 한국어로 작성한다. 코드 식별자는 영어, 주석은 한국어로 쓴다.
 
 ## 기술 스택
 - Python 3.11 (`.python-version`)
-- 엔진은 표준 라이브러리만 쓴다. FastAPI, uvicorn은 3단계(실시간 서버)부터 쓴다.
+- 엔진(`app/simulation`)은 표준 라이브러리만 쓴다. 서버(`app/server`)는 FastAPI, uvicorn(WebSocket).
+- 테스트 클라이언트는 `httpx2` (Starlette 1.10부터 `httpx`는 deprecated)
 - pytest, ruff, GitHub Actions
 
 ## 명령어 (Windows PowerShell, 프로젝트 루트 기준)
 - 가상환경 Python: `.\.venv\Scripts\python.exe`
 - 의존성 설치: `.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt`
 - 테스트: `.\.venv\Scripts\python.exe -m pytest -q`
+- 서버: `.\.venv\Scripts\python.exe -m uvicorn app.main:app` (화면 http://localhost:8000). 설정은 `SIM_*` 환경 변수 (README 표)
 - 린트/포맷: `.\.venv\Scripts\ruff.exe check .` / `.\.venv\Scripts\ruff.exe format .`
 - 커밋 전에는 테스트, 린트, 포맷 검사를 모두 통과시킨다. CI(`.github/workflows/ci.yml`)도 같은 검사를 한다.
 
@@ -35,13 +37,22 @@
   - `dispatch.py`: 배차 전략. `DispatchStrategy`(ABC)의 `select(call, elevators) -> 카 번호`를 구현한다. `NearestCar`(적합도 FS). 새 전략은 이 인터페이스로 추가하고 `Simulation`에 분기를 넣지 않는다. 전략도 결정적이어야 한다(동점이면 번호가 작은 카).
   - `simulation.py`: `Simulation` (여러 대, 시계 보유). 홀 호출은 `press_hall_button` → 전략 → 그 카의 `assign_hall_call`. 카 호출은 `press_car_button(car, floor)`. 배차는 호출 순간 한 번만 하고(정적), 이미 맡은 카가 있으면 다시 배차하지 않는다. 배차 기록은 `assignments`.
   - `traffic.py`: 무작위 호출 발생기. 무작위성은 이 파일에만 있고 `random.Random(seed)`를 쓴다.
+- `app/server/`: 실시간 서버. 공유 시뮬레이션 하나를 모든 접속자가 본다.
+  - `settings.py`: `ServerSettings` (`SIM_*` 환경 변수). 새 설정을 추가하면 README 표도 갱신한다.
+  - `runner.py`: `SimulationRunner`. asyncio 루프가 `tick_ms`마다 `sim_ms_per_tick`만큼 진행하고 방송한다. 밀려도 몰아서 따라잡지 않는다.
+  - `broadcast.py`: 접속자마다 크기 1 큐(최신 상태만) + 전송 태스크. 방송은 기다리지 않는다.
+  - `rate_limit.py`: 접속자(IP)별 슬라이딩 윈도 로그. 서버 메모리라 서버 여러 대면 공유되지 않는다.
+  - `api.py`: REST와 `/ws`. `schemas.py`: Pydantic 모델(요청은 `extra="forbid"`), 상태 스냅샷.
+- `app/main.py`: `create_app(settings)`. 테스트는 설정을 바꿔 새 앱을 만든다. `app/static/index.html`: 한 페이지 화면(바닐라 JS).
 - `tests/`: pytest. 공용 도우미(`stops`, `run_until_idle`, 시간 상수)는 `tests/helpers.py`.
+  - API 테스트는 `run_loop=False`로 앱을 만들고 `runner.tick_once()`로 시간을 진행한다. 실제 루프가 필요한 테스트만 `with TestClient(app)`로 lifespan을 돌린다.
 - `docs/design.md`: 상태 머신 다이어그램과 설계 결정
 
 ## 규칙
 - 시간은 정수 밀리초다. `float` 시간을 도입하지 않는다(부동소수점 오차로 tick 크기에 따라 결과가 달라짐).
 - `tick(dt)` 결과는 tick 크기와 무관해야 한다. 시간 처리 코드를 바꾸면 `test_large_tick_equals_many_small_ticks`, `test_result_does_not_depend_on_tick_size`가 통과하는지 본다.
 - 판단 로직이 `set` 순회 순서에 기대면 안 된다(홀 호출 해시는 실행마다 다를 수 있음). 방향은 `(UP, DOWN)` 같은 고정 순서로 확인한다.
+- 시뮬레이션을 만지는 FastAPI 핸들러와 의존성은 반드시 `async def`다. `def`는 스레드 풀에서 돌아 루프와 동시에 상태를 바꾼다(락이 없다). tick과 호출 처리 사이에 `await`를 넣지 않는다.
 - 새 상태 전이를 추가하면 그 전이를 직접 일으키는 테스트를 함께 쓴다.
 - 비밀 정보는 `.env`에만 둔다. 코드, 문서, 커밋에 넣지 않는다.
 - 의존성을 추가하면 버전을 고정해 `requirements.txt`(실행용) 또는 `requirements-dev.txt`(개발용)에 적는다.

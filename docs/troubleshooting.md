@@ -14,6 +14,24 @@
 **배운 점**: 다음에 같은 문제를 어떻게 피할지, 무엇을 새로 알게 됐는지
 -->
 
+## 2026-11-08 TestClient를 쓰자 httpx deprecation 경고가 남
+
+**문제**: API 테스트에 FastAPI `TestClient`를 쓰자 테스트는 통과했지만 아래 경고가 나왔다. 1번 프로젝트와 같은 `httpx==0.28.1`을 그대로 가져온 상태였다.
+
+```
+StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+```
+
+**원인**: FastAPI 0.162가 쓰는 Starlette 1.10부터 테스트 클라이언트가 `httpx2`를 먼저 찾고, 없으면 `httpx`로 대신하면서 경고를 낸다(`starlette/testclient.py`).
+
+**해결**: `httpx` 대신 `httpx2==2.16.0`을 개발 의존성에 고정했다. 처음 보는 패키지라 설치 전에 PyPI 메타데이터를 확인했다. httpx 원작자가 만들고 pydantic 조직이 관리하는 후속 패키지다. 바꾼 뒤 경고 없이 148개 테스트가 통과했다.
+
+**배운 점**:
+
+- 경고는 다음 버전에서 오류가 된다는 예고다. 테스트가 통과해도 경고를 읽고 바로 처리한다.
+- 다른 프로젝트의 의존성 목록을 복사할 때는 프레임워크 버전에 따라 짝이 되는 라이브러리가 바뀌었는지 확인한다.
+- 이름이 비슷한 새 패키지(`httpx` → `httpx2`)는 타이포스쿼팅일 수 있다. 공식 문서나 프레임워크 코드가 그 이름을 가리키는지, 관리 주체가 누구인지 확인하고 설치한다.
+
 ## 2026-11-08 ruff format --check가 README.md 때문에 실패함
 
 **문제**: 파이썬 코드는 모두 포맷돼 있는데 `ruff format --check .`가 `README.md`를 "다시 포맷해야 함"으로 보고하며 실패했다. 이대로 push했다면 CI의 Format check 단계가 실패했을 것이다.
