@@ -37,11 +37,22 @@ class ElevatorState(StrEnum):
     DOORS_OPENING = "DOORS_OPENING"
     DOORS_OPEN = "DOORS_OPEN"
     DOORS_CLOSING = "DOORS_CLOSING"
+    OUT_OF_SERVICE = "OUT_OF_SERVICE"  # 운행에서 뺀 상태 (고장 격리, 점검). 배차 대상이 아니다
 
+
+MOVING_STATES = frozenset({ElevatorState.MOVING_UP, ElevatorState.MOVING_DOWN})
 
 DOOR_STATES = frozenset(
     {ElevatorState.DOORS_OPENING, ElevatorState.DOORS_OPEN, ElevatorState.DOORS_CLOSING}
 )
+
+
+class Fault(StrEnum):
+    """주입할 수 있는 고장 (6단계). 카는 고장을 알리지 않는다. 감지는 Monitor가 동작을 보고 한다."""
+
+    DOOR_SENSOR = "DOOR_SENSOR"  # 문 센서 이상: 닫힐 때마다 다시 열린다
+    STALL = "STALL"  # 층 사이 멈춤: 이동 중으로 보이지만 더 나아가지 않는다
+    SLOW_MOTOR = "SLOW_MOTOR"  # 모터 저하: 층간 이동 시간이 2배
 
 
 @dataclass(frozen=True)

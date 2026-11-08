@@ -9,8 +9,17 @@ from app.simulation.building import Building
 from app.simulation.config import ElevatorConfig
 from app.simulation.dispatch import CallRequest, DispatchStrategy, NearestCar
 from app.simulation.elevator import Elevator, StateChange
+from app.simulation.monitor import Monitor, ServiceEvent, ServiceKind, Severity
 from app.simulation.passengers import Passenger, PassengerArrival, RunStats, summarize
-from app.simulation.types import Call, CarCall, Direction, ElevatorState, HallCall
+from app.simulation.types import (
+    DOOR_STATES,
+    Call,
+    CarCall,
+    Direction,
+    ElevatorState,
+    Fault,
+    HallCall,
+)
 
 S = ElevatorState
 
@@ -38,6 +47,21 @@ class Assignment:
 
 
 Event = ScheduledCall | PassengerArrival
+
+
+class _CandidateContext:
+    """배차 후보(운행 중인 카)만 전략에 넘길 때, 전략이 보는 번호(후보 목록 안의 위치)를
+    실제 카 번호로 바꿔 승객 정보를 찾아 준다."""
+
+    def __init__(self, sim: "Simulation", candidates: list[int]) -> None:
+        self.sim = sim
+        self.candidates = candidates
+
+    def destinations(self, car: int) -> frozenset[int]:
+        return self.sim.destinations(self.candidates[car])
+
+    def load(self, car: int) -> int:
+        return self.sim.load(self.candidates[car])
 
 
 class Simulation:
@@ -73,14 +97,24 @@ class Simulation:
         self._prev_state = [car.state for car in self.elevators]
         for index, car in enumerate(self.elevators):
             car.on_state_change = self._listener(index)
+            car.on_floor_reached = self._floor_listener(index)
+
+        # 고장, 감지, 점검 (6단계)
+        self.monitor: Monitor | None = None  # Monitor(sim)으로 붙인다
+        self.service_log: list[ServiceEvent] = []
+        self._maintenance: set[int] = set()  # 점검 요청: 새 호출을 받지 않고, 일을 끝내면 운행 중지
+        # 운행 중인 카가 하나도 없어 배차하지 못한 요청. 카가 복귀하면 배차한다.
+        self._deferred_calls: list[HallCall] = []
+        self._deferred_passengers: list[Passenger] = []
 
     # ------------------------------------------------------------------ 버튼 입력
 
-    def press_hall_button(self, floor: int, direction: Direction) -> int:
+    def press_hall_button(self, floor: int, direction: Direction) -> int | None:
         """건물의 홀 버튼(방향만 누름). 맡은 카의 번호를 돌려준다.
 
         배차는 호출이 들어오는 순간 한 번만 한다(이후 다시 배정하지 않음). 이미 어느 카가
-        맡고 있는 호출이면 다시 배차하지 않고 그 카 번호를 돌려준다.
+        맡고 있는 호출이면 다시 배차하지 않고 그 카 번호를 돌려준다. 운행 중인 카가 없으면
+        None을 돌려주고, 카가 복귀할 때 배차한다.
         """
         self.building.validate_hall_call(floor, direction)
         call = HallCall(floor, direction)
@@ -88,6 +122,10 @@ class Simulation:
             if call in car.hall_calls:
                 return index
         index = self._dispatch(CallRequest(floor, direction))
+        if index is None:
+            if call not in self._deferred_calls:
+                self._deferred_calls.append(call)
+            return None
         self.assignments.append(Assignment(self.now_ms, call, index))
         self.elevators[index].assign_hall_call(floor, direction)
         return index
@@ -96,11 +134,23 @@ class Simulation:
         """car번 카 안에서 목적층 버튼을 누른다."""
         self._car(car).press_car_button(floor)
 
-    def _dispatch(self, request: CallRequest) -> int:
-        index = self.strategy.select(request, self.elevators, self)
-        if not 0 <= index < len(self.elevators):
-            raise ValueError(f"배차 전략이 없는 카 번호를 골랐습니다: {index}")
-        return index
+    def is_maintenance_requested(self, car: int) -> bool:
+        return car in self._maintenance
+
+    def is_available(self, car: int) -> bool:
+        """배차 대상인가: 운행 중이고 점검 요청이 없는 카."""
+        return self.elevators[car].in_service and car not in self._maintenance
+
+    def _dispatch(self, request: CallRequest) -> int | None:
+        """운행 중인 카 중에서 전략이 고른 카 번호. 후보가 없으면 None."""
+        candidates = [i for i in range(len(self.elevators)) if self.is_available(i)]
+        if not candidates:
+            return None
+        cars = [self.elevators[i] for i in candidates]
+        local = self.strategy.select(request, cars, _CandidateContext(self, candidates))
+        if not 0 <= local < len(cars):
+            raise ValueError(f"배차 전략이 없는 카 번호를 골랐습니다: {local}")
+        return candidates[local]
 
     def _car(self, index: int) -> Elevator:
         if not 0 <= index < len(self.elevators):
@@ -144,6 +194,9 @@ class Simulation:
             # 목적층 예약: 승객마다 따로 배차하고, 승객은 배정된 카만 탄다.
             index = self._dispatch(CallRequest(p.origin, p.direction, p.destination))
             p.assigned_car = index
+            if index is None:
+                self._deferred_passengers.append(p)
+                return
             call = HallCall(p.origin, p.direction)
             self.assignments.append(Assignment(self.now_ms, call, index))
             self.elevators[index].assign_hall_call(p.origin, p.direction)
@@ -162,8 +215,20 @@ class Simulation:
                 self._board(index, car)
             elif previous is S.DOORS_CLOSING:
                 self._rerequest_left_behind(change.floor)
+            if self.monitor is not None:
+                self.monitor.on_state_change(index, car, change, previous)
+            # 점검 요청된 카는 맡은 일을 모두 끝내고 대기 상태가 되는 순간 운행에서 뺀다.
+            if index in self._maintenance and car.is_idle:
+                self.take_out_of_service(index, reason="MAINTENANCE")
 
         return on_change
+
+    def _floor_listener(self, index: int):
+        def on_floor(car: Elevator) -> None:
+            if self.monitor is not None:
+                self.monitor.on_floor_reached(index, car)
+
+        return on_floor
 
     def _answer_hall_call(self, index: int, change: StateChange) -> None:
         """일반 방식: 이 카가 이 층의 이 방향 손님을 태우므로, 다른 카가 같은 호출로 오지 않게
@@ -219,11 +284,88 @@ class Simulation:
         for p in list(self._waiting[floor]):
             call = HallCall(floor, p.direction)
             if self.strategy.uses_destination:
-                assert p.assigned_car is not None
+                if p.assigned_car is None:
+                    continue  # 배차를 기다리는 승객 (운행 중인 카가 없음)
                 if call not in self.elevators[p.assigned_car].hall_calls:
                     self._request_service(p)
             elif not any(call in car.hall_calls for car in self.elevators):
                 self.press_hall_button(floor, p.direction)
+
+    # ------------------------------------------------------------------ 고장, 운행 중지, 점검
+
+    def log_service(
+        self,
+        kind: ServiceKind,
+        car: int,
+        detail: str = "",
+        severity: Severity | None = None,
+        message: str = "",
+    ) -> None:
+        self.service_log.append(ServiceEvent(self.now_ms, car, kind, detail, severity, message))
+
+    def drain_service_log(self) -> list[ServiceEvent]:
+        """서비스 기록을 꺼내고 비운다 (오래 도는 서버에서 메모리에 쌓이지 않게)."""
+        drained, self.service_log = self.service_log, []
+        return drained
+
+    def inject_fault(self, car: int, fault: Fault) -> None:
+        self._car(car).inject_fault(fault)
+        self.log_service(ServiceKind.FAULT, car, fault.value)
+
+    def repair(self, car: int) -> None:
+        self._car(car).repair()
+        self.log_service(ServiceKind.REPAIR, car)
+
+    def take_out_of_service(self, car: int, reason: str) -> None:
+        """카를 운행에서 빼고, 그 카가 맡던 홀 호출을 다른 카에 다시 배차한다.
+
+        안에 탄 승객은 그대로 남는다(복귀하면 목적층으로 간다). 문을 열고 있던 층에서 기다리던
+        승객은 다시 호출한다.
+        """
+        elevator = self._car(car)
+        if not elevator.in_service:
+            return
+        was_at_floor = elevator.state in DOOR_STATES
+        dropped = elevator.take_out_of_service()
+        self.log_service(ServiceKind.OUT_OF_SERVICE, car, reason)
+        if self.strategy.uses_destination:
+            for p in list(self._assigned_waiting(car)):
+                p.assigned_car = None
+                self._request_service(p)
+        else:
+            for call in dropped:
+                self.press_hall_button(call.floor, call.direction)
+        if was_at_floor:
+            self._rerequest_left_behind(elevator.floor)
+
+    def request_maintenance(self, car: int) -> None:
+        """점검 요청: 새 호출은 받지 않고, 맡은 일을 끝내면 운행에서 뺀다 (승객을 내려놓고 멈춤)."""
+        elevator = self._car(car)
+        if car in self._maintenance or not elevator.in_service:
+            return
+        self._maintenance.add(car)
+        self.log_service(ServiceKind.MAINTENANCE_REQUEST, car)
+        if elevator.is_idle:
+            self.take_out_of_service(car, reason="MAINTENANCE")
+
+    def return_to_service(self, car: int) -> None:
+        """운행에 복귀시키고, 그동안 배차하지 못한 요청을 다시 배차한다."""
+        elevator = self._car(car)
+        self._maintenance.discard(car)
+        if elevator.in_service:
+            return
+        # 감지기를 먼저 초기화한다. 복귀하면서 바로 "이동 중"으로 바뀌면 감지기가 그 순간부터
+        # 다시 재기 시작하는데, 초기화를 나중에 하면 그 시작 시각을 지워 멈춤을 놓친다.
+        if self.monitor is not None:
+            self.monitor.reset(car)
+        elevator.return_to_service()
+        self.log_service(ServiceKind.RETURN, car)
+        calls, self._deferred_calls = self._deferred_calls, []
+        for call in calls:
+            self.press_hall_button(call.floor, call.direction)
+        passengers, self._deferred_passengers = self._deferred_passengers, []
+        for p in passengers:
+            self._request_service(p)
 
     # ------------------------------------------------------------------ 예약
 
@@ -289,10 +431,17 @@ class Simulation:
         while True:
             pending = [c.time_to_next_event for c in self.elevators]
             due = [self.now_ms + t for t in pending if t is not None]
+            if self.monitor is not None:
+                # 감지 규칙의 판정 시각(예: 멈춤)도 사건이다. 정확히 그 시각에 판정해야 결정적이다.
+                deadline = self.monitor.next_deadline()
+                if deadline is not None:
+                    due.append(max(deadline, self.now_ms))
             next_ms = min(due, default=None)
             if next_ms is None or next_ms > time_ms:
                 break
             self._move_clock(next_ms - self.now_ms)
+            if self.monitor is not None:
+                self.monitor.on_time(self.now_ms)
         self._move_clock(time_ms - self.now_ms)
 
     def _move_clock(self, dt_ms: int) -> None:
@@ -309,9 +458,10 @@ class Simulation:
         """모든 카가 대기 중이고 남은 호출, 예약, 승객이 없는가."""
         return (
             not self._queue
-            and all(car.is_idle for car in self.elevators)
+            and all(car.is_idle or not car.in_service for car in self.elevators)
             and not any(self._waiting.values())
             and not any(self._riding)
+            and not self._deferred_calls
         )
 
     def stats(self) -> RunStats:

@@ -16,10 +16,12 @@ from app.simulation.building import Building
 from app.simulation.config import ElevatorConfig
 from app.simulation.types import (
     DOOR_STATES,
+    MOVING_STATES,
     Call,
     CarCall,
     Direction,
     ElevatorState,
+    Fault,
     HallCall,
 )
 
@@ -55,6 +57,12 @@ class Elevator:
         self.direction = Direction.NONE
         # 지금 하고 있는 일(이동, 문 동작)이 끝날 때까지 남은 시간
         self._remaining_ms = 0
+        self._segment_ms = self.config.floor_travel_ms  # 지금 층간 이동 한 구간의 길이
+
+        # 고장과 운행 중지 (6단계)
+        self.fault: Fault | None = None
+        # 이동 중에 운행에서 빼면 그 상태를 기억했다가, 복귀하면 이어서 간다 (층 사이에 멈춘 경우).
+        self._resume_state: ElevatorState | None = None
 
         # 집합(set)이라 같은 호출을 여러 번 눌러도 한 번만 남는다.
         self._car_calls: set[int] = set()
@@ -64,6 +72,9 @@ class Elevator:
         self.history: list[StateChange] = []
         # 상태가 바뀔 때마다 불리는 함수. Simulation이 승객 처리에 쓴다.
         self.on_state_change: Callable[[Elevator, StateChange], None] | None = None
+        # 이동 중 층에 닿을 때마다 불리는 함수 (서지 않고 지나가는 층 포함).
+        # Monitor가 층간 이동 시간을 잰다.
+        self.on_floor_reached: Callable[[Elevator], None] | None = None
         self._record()
 
     # ------------------------------------------------------------------ 조회
@@ -88,21 +99,39 @@ class Elevator:
 
     @property
     def time_to_next_event(self) -> int | None:
-        """다음 상태 전이까지 남은 시간. 대기 중이면 스스로 바뀌지 않으므로 None."""
-        return None if self.state is ElevatorState.IDLE else self._remaining_ms
+        """다음 상태 전이까지 남은 시간. 스스로 바뀌지 않는 상태(대기, 운행 중지, 멈춤)면 None."""
+        return None if self._frozen else self._remaining_ms
+
+    @property
+    def _frozen(self) -> bool:
+        """시간이 흘러도 상태가 바뀌지 않는가."""
+        if self.state in (ElevatorState.IDLE, ElevatorState.OUT_OF_SERVICE):
+            return True
+        # 층 사이 멈춤 고장: 이동 중으로 보이지만 남은 시간이 줄지 않는다.
+        return self.fault is Fault.STALL and self.state in MOVING_STATES
+
+    @property
+    def in_service(self) -> bool:
+        return self.state is not ElevatorState.OUT_OF_SERVICE
 
     @property
     def position(self) -> float:
         """화면 표시용 위치(층 단위 실수). 이동 중이면 층 사이 값이 나온다."""
-        if self.state is ElevatorState.MOVING_UP:
+        state = self._resume_state or self.state  # 층 사이에서 운행 중지된 카도 그 위치에 그린다
+        if state is ElevatorState.MOVING_UP:
             return self.floor + self._travel_progress()
-        if self.state is ElevatorState.MOVING_DOWN:
+        if state is ElevatorState.MOVING_DOWN:
             return self.floor - self._travel_progress()
         return float(self.floor)
 
     def _travel_progress(self) -> float:
-        travel = self.config.floor_travel_ms
-        return (travel - self._remaining_ms) / travel
+        return (self._segment_ms - self._remaining_ms) / self._segment_ms
+
+    @property
+    def _travel_ms(self) -> int:
+        """한 층 이동 시간. 모터 저하 고장이면 2배."""
+        factor = 2 if self.fault is Fault.SLOW_MOTOR else 1
+        return self.config.floor_travel_ms * factor
 
     # ------------------------------------------------------------------ 입력
 
@@ -121,6 +150,46 @@ class Elevator:
         self._hall_calls.add(HallCall(floor, direction))
         self._on_new_call()
 
+    # ------------------------------------------------------------------ 고장과 운행 중지
+
+    def inject_fault(self, fault: Fault) -> None:
+        """고장을 주입한다. 카는 고장을 알리지 않고 이상하게 움직이기만 한다 (감지는 Monitor)."""
+        self.fault = fault
+
+    def repair(self) -> None:
+        """고장을 고친다. 운행 중지 상태라면 복귀는 따로 해야 한다 (return_to_service)."""
+        self.fault = None
+
+    def take_out_of_service(self) -> list[HallCall]:
+        """운행에서 뺀다. 맡고 있던 홀 호출을 돌려준다 (다른 카에 다시 배차하도록).
+
+        카 호출(안에 탄 승객의 목적층)은 남긴다. 복귀하면 이어서 처리한다.
+        """
+        if self.state is ElevatorState.OUT_OF_SERVICE:
+            return []
+        if self.state in MOVING_STATES:
+            self._resume_state = self.state
+        dropped = sorted(self._hall_calls, key=lambda c: (c.floor, c.direction))
+        self._hall_calls.clear()
+        self.state = ElevatorState.OUT_OF_SERVICE
+        self._record()
+        return dropped
+
+    def return_to_service(self) -> None:
+        """운행에 복귀한다. 층 사이에서 멈췄던 카는 가던 방향으로 이어서 간다."""
+        if self.state is not ElevatorState.OUT_OF_SERVICE:
+            return
+        resume, self._resume_state = self._resume_state, None
+        if resume is not None:
+            self.state = resume
+            self._record()
+            return
+        self.state = ElevatorState.IDLE
+        self.direction = Direction.NONE
+        self._remaining_ms = 0
+        self._record()
+        self._decide()  # 안에 탄 승객의 목적층이 남아 있으면 바로 출발한다
+
     def cancel_hall_call(self, call: HallCall) -> None:
         """맡았던 홀 호출을 취소한다 (다른 카가 먼저 그 손님을 태운 경우).
 
@@ -137,6 +206,8 @@ class Elevator:
                 self.assign_hall_call(floor, direction)
 
     def _on_new_call(self) -> None:
+        if self.state is ElevatorState.OUT_OF_SERVICE:
+            return  # 호출은 기억만 하고, 복귀한 뒤 처리한다
         if self.state is ElevatorState.IDLE:
             self._decide()
             return
@@ -161,12 +232,8 @@ class Elevator:
         remaining = dt_ms
         self.complete_due_phases()
         while remaining > 0:
-            # 대기 중이면 남은 시간은 그냥 흘러간다.
-            step = (
-                remaining
-                if self.state is ElevatorState.IDLE
-                else min(remaining, self._remaining_ms)
-            )
+            # 스스로 바뀌지 않는 상태(대기, 운행 중지, 멈춤)면 남은 시간은 그냥 흘러간다.
+            step = remaining if self._frozen else min(remaining, self._remaining_ms)
             self.elapse(step)
             remaining -= step
             self.complete_due_phases()
@@ -178,7 +245,7 @@ class Elevator:
         하려고 tick을 두 단계(elapse → complete_due_phases)로 나눠 쓴다. 한 카의 전이(예: 승객이
         탐)가 다른 카에 영향을 줄 때, 다른 카도 이미 같은 시각에 있어야 하기 때문이다.
         """
-        if self.state is not ElevatorState.IDLE:
+        if not self._frozen:
             if dt_ms > self._remaining_ms:
                 raise ValueError("다음 전이 시각을 넘어 시계를 진행할 수 없습니다.")
             self._remaining_ms -= dt_ms
@@ -186,7 +253,7 @@ class Elevator:
 
     def complete_due_phases(self) -> None:
         """남은 시간이 0이 된 동작을 끝내고 다음 상태로 넘어간다 (연달아 끝나는 것까지)."""
-        while self.state is not ElevatorState.IDLE and self._remaining_ms == 0:
+        while not self._frozen and self._remaining_ms == 0:
             self._complete_phase()
 
     def _complete_phase(self) -> None:
@@ -195,13 +262,19 @@ class Elevator:
             case ElevatorState.MOVING_UP | ElevatorState.MOVING_DOWN:
                 self.floor += self.direction.step
                 self.floors_traveled += 1
+                if self.on_floor_reached is not None:
+                    self.on_floor_reached(self)
                 self._on_arrive()
             case ElevatorState.DOORS_OPENING:
                 self._set_state(ElevatorState.DOORS_OPEN, self.config.door_dwell_ms)
             case ElevatorState.DOORS_OPEN:
                 self._set_state(ElevatorState.DOORS_CLOSING, self.config.door_transition_ms)
             case ElevatorState.DOORS_CLOSING:
-                self._decide()
+                if self.fault is Fault.DOOR_SENSOR:
+                    # 센서가 막힌 것으로 판단해 다시 연다. 고칠 때까지 열고 닫기를 되풀이한다.
+                    self._set_state(ElevatorState.DOORS_OPENING, self.config.door_transition_ms)
+                else:
+                    self._decide()
 
     # ------------------------------------------------------------------ LOOK 판단
 
@@ -219,7 +292,7 @@ class Elevator:
             or not self._has_calls_beyond(d)
         )
         if not stop_here:
-            self._remaining_ms = self.config.floor_travel_ms
+            self._segment_ms = self._remaining_ms = self._travel_ms
             return
         if self._has_any_call_here():
             self._open_doors()
@@ -291,7 +364,8 @@ class Elevator:
         assert self.building.bottom <= next_floor <= self.building.top, "건물 범위 밖 이동"
         self.direction = direction
         state = ElevatorState.MOVING_UP if direction is Direction.UP else ElevatorState.MOVING_DOWN
-        self._set_state(state, self.config.floor_travel_ms)
+        self._segment_ms = self._travel_ms
+        self._set_state(state, self._segment_ms)
 
     def _open_doors(self) -> None:
         self.direction = self._direction_at_stop()
