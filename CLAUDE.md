@@ -51,7 +51,7 @@
   - `traffic.py`: 무작위 호출, 교통 패턴(`PATTERNS`: up-peak, lunch, down-peak)과 포아송 도착(`poisson_passengers`). 무작위성은 이 파일에만 있고 `random.Random(seed)`를 쓴다.
 - `app/server/`: 실시간 서버. 공유 시뮬레이션 하나를 모든 접속자가 본다.
   - `settings.py`: `ServerSettings` (`SIM_*` 환경 변수). 새 설정을 추가하면 README 표도 갱신한다.
-  - `runner.py`: `SimulationRunner`. asyncio 루프가 `tick_ms`마다 `sim_ms_per_tick`만큼 진행하고 방송한다. 밀려도 몰아서 따라잡지 않는다.
+  - `runner.py`: `SimulationRunner`. 자동 승객(`PassengerStream`, `SIM_AUTO_*`)을 tick마다 예약하고, 다 내린 승객은 꺼내서 저장하거나 버린다(메모리). asyncio 루프가 `tick_ms`마다 `sim_ms_per_tick`만큼 진행하고 방송한다. 밀려도 몰아서 따라잡지 않는다.
   - `broadcast.py`: 접속자마다 크기 1 큐(최신 상태만) + 전송 태스크. 방송은 기다리지 않는다.
   - `rate_limit.py`: 접속자(IP)별 슬라이딩 윈도 로그. 서버 메모리라 서버 여러 대면 공유되지 않는다.
   - `api.py`: REST와 `/ws`. `schemas.py`: Pydantic 모델(요청은 `extra="forbid"`), 상태 스냅샷.

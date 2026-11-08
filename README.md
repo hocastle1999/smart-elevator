@@ -67,6 +67,7 @@ print([(a.time_ms, a.call.floor, a.car) for a in sim.assignments])
 - REST로 호출합니다: `POST /api/hall-calls`(배차된 카 번호를 돌려줌), `POST /api/elevators/{car}/car-calls`.
 - **락 없이 안전**: 루프와 핸들러가 같은 이벤트 루프 스레드에서 돌고, 그 사이에 `await`가 없어 서로 끼어들지 않습니다. 그래서 핸들러는 모두 `async def`입니다.
 - **느린 접속자 격리**: 접속자마다 최신 상태 1개만 담는 큐를 둬서, 한 명이 느려도 루프와 다른 접속자는 기다리지 않습니다.
+- **자동 승객**: 아무도 누르지 않아도 엘리베이터가 움직이도록 서버가 포아송 도착 승객을 계속 넣습니다(기본 분당 6명, 출근·점심·퇴근 패턴을 10분마다 바꿈). 화면에 층별 대기 인원, 카별 탑승 인원, 최근 평균 대기 시간이 보입니다. 다 내린 승객은 메모리에서 빼고(DB가 있으면 저장) 쌓아 두지 않습니다.
 - **공유 데모 보호**: 접속자(IP)별 호출 빈도 제한(429 + `Retry-After`), 동시 접속 상한(넘으면 1013으로 닫음).
 
 ## 4단계: 승객과 배차 전략 비교
@@ -159,6 +160,9 @@ py -3.11 -m venv .venv
 | `SIM_RATE_WINDOW_MS` | 10000 | 위 횟수를 세는 기간 |
 | `SIM_RECORD_FLUSH_MS` | 5000 | 운행 기록을 DB에 묶어서 저장하는 간격 |
 | `ADMIN_TOKEN` | (없음) | 관리 API 토큰. 비워 두면 관리 API는 403. 요청 헤더 `X-Admin-Token`으로 보낸다 |
+| `SIM_AUTO_PER_MINUTE` | 6 | 자동 승객(데모): 분당 도착 인원. 0이면 끈다 |
+| `SIM_AUTO_PATTERN` | cycle | `up-peak`, `lunch`, `down-peak`, 또는 `cycle`(10분마다 돌아가며) |
+| `SIM_AUTO_SEED` | 0 | 자동 승객 난수 시드 |
 | `SIM_TRUSTED_PROXY_HOPS` | 0 | 앞에 있는 신뢰하는 프록시 수. 0이면 `X-Forwarded-For`를 무시 (Render는 1) |
 | `DB_ENABLED` | false | 운행 기록 저장과 통계 API 사용 (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`는 .env.example 참고) |
 
