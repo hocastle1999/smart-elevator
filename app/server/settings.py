@@ -3,6 +3,8 @@
 import os
 from dataclasses import dataclass, fields
 
+ZERO_ALLOWED = {"trusted_proxy_hops"}
+
 
 @dataclass(frozen=True)
 class ServerSettings:
@@ -18,13 +20,18 @@ class ServerSettings:
     rate_window_ms: int = 10_000
     # 운행 기록을 DB에 묶어서 저장하는 간격 (DB_ENABLED일 때만)
     record_flush_ms: int = 5000
+    # 앞에 있는 신뢰하는 프록시 수 (Render 같은 플랫폼). 0이면 X-Forwarded-For를 무시하고
+    # 접속한 상대의 IP를 그대로 쓴다. 자세한 이유는 rate_limit.client_ip.
+    trusted_proxy_hops: int = 0
     # False면 시작할 때 루프를 돌리지 않는다 (테스트에서 tick을 직접 부를 때)
     run_loop: bool = True
 
     def __post_init__(self) -> None:
         for f in fields(self):
             value = getattr(self, f.name)
-            if not isinstance(value, bool) and value <= 0:
+            if isinstance(value, bool):
+                continue
+            if value < 0 or (value == 0 and f.name not in ZERO_ALLOWED):
                 raise ValueError(f"{f.name}은 양수여야 합니다: {value}")
 
     @classmethod

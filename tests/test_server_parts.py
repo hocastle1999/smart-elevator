@@ -6,7 +6,7 @@ import time
 import pytest
 
 from app.server.broadcast import Broadcaster, Client
-from app.server.rate_limit import RateLimiter
+from app.server.rate_limit import RateLimiter, client_ip
 from app.server.runner import SimulationRunner
 from app.server.settings import ServerSettings
 from app.simulation import Direction
@@ -159,3 +159,28 @@ def test_runner_does_not_keep_history_in_memory():
         runner.tick_once()
     assert all(not car.history for car in runner.simulation.elevators)
     assert runner.simulation.assignments == []
+
+
+# ---------------------------------------------------------------- 프록시 뒤의 접속자 IP
+
+
+@pytest.mark.parametrize(
+    ("peer", "forwarded", "hops", "expected"),
+    [
+        ("10.0.0.1", None, 0, "10.0.0.1"),  # 프록시 없음: 접속한 상대 그대로
+        ("10.0.0.1", "203.0.113.5", 0, "10.0.0.1"),  # 프록시 없으면 헤더를 믿지 않는다
+        ("10.0.0.1", "203.0.113.5", 1, "203.0.113.5"),  # 프록시 1단: 오른쪽 끝
+        ("10.0.0.1", "6.6.6.6, 203.0.113.5", 1, "203.0.113.5"),  # 위조한 왼쪽 값은 무시
+        ("10.0.0.1", "6.6.6.6, 203.0.113.5, 172.16.0.9", 2, "203.0.113.5"),  # 프록시 2단
+        ("10.0.0.1", "", 1, "10.0.0.1"),  # 헤더가 비면 상대 IP
+        (None, None, 0, "unknown"),
+    ],
+)
+def test_client_ip_trusts_only_proxy_appended_values(peer, forwarded, hops, expected):
+    assert client_ip(peer, forwarded, hops) == expected
+
+
+def test_settings_allow_zero_proxy_hops_but_not_negative():
+    assert ServerSettings(trusted_proxy_hops=0).trusted_proxy_hops == 0
+    with pytest.raises(ValueError):
+        ServerSettings(trusted_proxy_hops=-1)

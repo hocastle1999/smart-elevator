@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, stat
 
 from app.server.admin import require_admin
 from app.server.broadcast import serve_client
-from app.server.rate_limit import RateLimiter
+from app.server.rate_limit import RateLimiter, client_ip
 from app.server.runner import SimulationRunner
 from app.server.schemas import (
     CarCallRequest,
@@ -28,13 +28,19 @@ def _runner(request: Request) -> SimulationRunner:
 
 def _check_rate(request: Request) -> None:
     limiter: RateLimiter = request.app.state.rate_limiter
-    # 프록시 뒤에서는 uvicorn --proxy-headers로 실제 접속자 IP가 들어온다.
-    key = request.client.host if request.client else "unknown"
+    hops = request.app.state.settings.trusted_proxy_hops
+    key = client_ip(
+        request.client.host if request.client else None,
+        request.headers.get("x-forwarded-for"),
+        hops,
+    )
     retry_after = limiter.check(key)
     if retry_after > 0:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="호출이 너무 잦습니다. 잠시 후 다시 시도하세요.",
+            # 어떤 IP 기준으로 제한했는지 알려 준다 (호출한 사람 자신의 IP라 노출 문제가 없고,
+            # 배포 환경에서 프록시 설정이 맞는지 확인하는 데 쓴다).
+            detail=f"호출이 너무 잦습니다. 잠시 후 다시 시도하세요. (기준 IP: {key})",
             headers={"Retry-After": str(math.ceil(retry_after))},
         )
 

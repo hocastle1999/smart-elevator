@@ -48,3 +48,24 @@ class RateLimiter:
         cutoff = now - self.window_s
         for key in [k for k, hits in self._hits.items() if not hits or hits[-1] <= cutoff]:
             del self._hits[key]
+
+
+def client_ip(peer: str | None, forwarded_for: str | None, trusted_hops: int) -> str:
+    """빈도 제한에 쓸 접속자 IP.
+
+    배포 플랫폼(Render 등)에서는 요청이 프록시를 거쳐 오므로 접속한 상대(peer)는 프록시다.
+    그대로 쓰면 모든 방문자가 한도 하나를 같이 쓴다. 프록시는 실제 접속자 IP를
+    X-Forwarded-For 헤더의 "오른쪽 끝"에 덧붙인다.
+
+    헤더의 왼쪽 값은 믿으면 안 된다: 방문자가 X-Forwarded-For: 1.2.3.4 를 직접 넣어 보내면
+    프록시는 그 뒤에 실제 IP를 붙일 뿐이라, 맨 왼쪽 값을 쓰면 요청마다 IP를 바꿔 제한을 피할 수
+    있다. 그래서 신뢰하는 프록시 수(trusted_hops)만큼 오른쪽에서 센 값을 쓴다.
+    (uvicorn --proxy-headers --forwarded-allow-ips="*"도 이 위조를 막지 못해 쓰지 않는다.)
+    """
+    fallback = peer or "unknown"
+    if trusted_hops <= 0 or not forwarded_for:
+        return fallback
+    hops = [part.strip() for part in forwarded_for.split(",") if part.strip()]
+    if len(hops) < trusted_hops:
+        return fallback
+    return hops[-trusted_hops]

@@ -235,3 +235,25 @@ def test_hall_call_without_any_car_in_service_returns_null(admin_client):
         admin(admin_client, f"/api/elevators/{car}/maintenance")
     res = admin_client.post("/api/hall-calls", json={"floor": 4, "direction": "UP"})
     assert res.status_code == 202 and res.json()["car"] is None
+
+
+def test_rate_limit_uses_forwarded_ip_behind_proxy():
+    client = make_client(calls_per_window=1, rate_window_ms=60_000, trusted_proxy_hops=1)
+    body = {"floor": 2, "direction": "UP"}
+
+    def post(forwarded: str):
+        return client.post("/api/hall-calls", json=body, headers={"X-Forwarded-For": forwarded})
+
+    # 같은 실제 IP(오른쪽 끝)에서 왼쪽 값만 바꿔 보내도 같은 사람으로 센다
+    first = client.post(
+        "/api/hall-calls", json=body, headers={"X-Forwarded-For": "1.1.1.1, 9.9.9.9"}
+    )
+    assert first.status_code == 202
+    second = client.post(
+        "/api/hall-calls", json=body, headers={"X-Forwarded-For": "2.2.2.2, 9.9.9.9"}
+    )
+    assert second.status_code == 429
+    assert "9.9.9.9" in second.json()["detail"]
+    # 다른 사람(다른 실제 IP)은 따로 센다
+    other = post("8.8.8.8")
+    assert other.status_code == 202
