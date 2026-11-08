@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# 비밀 정보 (커밋 금지)
+.env
+
+# 에디터 / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
