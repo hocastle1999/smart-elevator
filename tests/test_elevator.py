@@ -42,7 +42,7 @@ def test_call_while_idle_departs_immediately(building):
 
 def test_hall_call_below_while_idle_moves_down(building):
     e = make(building, start=7)
-    e.press_hall_button(2, Direction.UP)
+    e.assign_hall_call(2, Direction.UP)
     assert e.state is S.MOVING_DOWN
     assert e.direction is Direction.DOWN
 
@@ -74,7 +74,7 @@ def test_full_door_cycle_then_idle(building):
 
 def test_call_at_current_floor_while_idle_opens_doors(building):
     e = make(building, start=4)
-    e.press_hall_button(4, Direction.DOWN)
+    e.assign_hall_call(4, Direction.DOWN)
     assert e.state is S.DOORS_OPENING
     assert e.direction is Direction.DOWN
     assert not e.hall_calls  # 문을 열면서 처리됨
@@ -110,7 +110,7 @@ def test_stops_for_same_direction_hall_call_on_the_way(building):
     e = make(building)
     e.press_car_button(6)
     e.tick(1000)  # 1층과 2층 사이
-    e.press_hall_button(4, Direction.UP)
+    e.assign_hall_call(4, Direction.UP)
     run_until_idle(e)
     assert stops(e) == [4, 6]
 
@@ -118,7 +118,7 @@ def test_stops_for_same_direction_hall_call_on_the_way(building):
 def test_passes_opposite_direction_hall_call_and_serves_it_later(building):
     e = make(building)
     e.press_car_button(6)
-    e.press_hall_button(4, Direction.DOWN)
+    e.assign_hall_call(4, Direction.DOWN)
     e.tick(3 * TRAVEL)  # 4층 도착 시각
     assert e.floor == 4
     assert e.state is S.MOVING_UP  # 내려가는 손님은 태우지 않고 지나간다
@@ -128,7 +128,7 @@ def test_passes_opposite_direction_hall_call_and_serves_it_later(building):
 
 def test_opposite_hall_call_at_farthest_floor_is_turnaround_point(building):
     e = make(building)
-    e.press_hall_button(5, Direction.DOWN)
+    e.assign_hall_call(5, Direction.DOWN)
     e.tick(4 * TRAVEL)
     assert e.state is S.DOORS_OPENING
     assert e.floor == 5
@@ -157,7 +157,7 @@ def test_call_behind_while_moving_waits_for_reversal(building):
     e = make(building)
     e.press_car_button(8)
     e.tick(2 * TRAVEL + 500)  # 3층을 떠나 4층으로 가는 중
-    e.press_hall_button(3, Direction.UP)  # 이미 지나친 층, 같은 방향
+    e.assign_hall_call(3, Direction.UP)  # 이미 지나친 층, 같은 방향
     run_until_idle(e)
     assert stops(e) == [8, 3]
 
@@ -190,13 +190,13 @@ def test_idle_picks_nearest_call_first(building):
 def test_hall_call_up_at_top_floor_is_rejected(building):
     e = make(building)
     with pytest.raises(ValueError):
-        e.press_hall_button(10, Direction.UP)
+        e.assign_hall_call(10, Direction.UP)
 
 
 def test_hall_call_down_at_bottom_floor_is_rejected(building):
     e = make(building)
     with pytest.raises(ValueError):
-        e.press_hall_button(1, Direction.DOWN)
+        e.assign_hall_call(1, Direction.DOWN)
 
 
 @pytest.mark.parametrize("floor", [0, 11, -1])
@@ -209,14 +209,14 @@ def test_out_of_range_floor_is_rejected(building, floor):
 def test_rejected_call_does_not_change_state(building):
     e = make(building)
     with pytest.raises(ValueError):
-        e.press_hall_button(10, Direction.UP)
+        e.assign_hall_call(10, Direction.UP)
     assert e.state is S.IDLE
     assert not e.hall_calls
 
 
 def test_travels_to_top_floor_and_comes_back(building):
     e = make(building)
-    e.press_hall_button(10, Direction.DOWN)
+    e.assign_hall_call(10, Direction.DOWN)
     run_until_idle(e)
     assert stops(e) == [10]
     e.press_car_button(1)
@@ -237,7 +237,7 @@ def test_at_top_floor_with_calls_below_moves_down(building):
 def _open_at(building: Building, floor: int, direction: Direction) -> Elevator:
     """floor층에서 direction 방향 손님을 위해 문이 완전히 열린 상태를 만든다."""
     e = make(building, start=floor)
-    e.press_hall_button(floor, direction)
+    e.assign_hall_call(floor, direction)
     e.tick(DOOR)
     assert e.state is S.DOORS_OPEN
     return e
@@ -246,7 +246,7 @@ def _open_at(building: Building, floor: int, direction: Direction) -> Elevator:
 def test_same_floor_same_direction_call_while_open_extends_dwell(building):
     e = _open_at(building, 3, Direction.UP)
     e.tick(2000)
-    e.press_hall_button(3, Direction.UP)
+    e.assign_hall_call(3, Direction.UP)
     assert not e.hall_calls  # 등록하지 않고 바로 처리
     e.tick(DWELL - 1)
     assert e.state is S.DOORS_OPEN  # 대기 시간이 처음부터 다시 시작됨
@@ -263,7 +263,7 @@ def test_car_call_for_current_floor_while_open_is_absorbed(building):
 def test_opposite_call_at_same_floor_while_open_waits(building):
     e = _open_at(building, 5, Direction.UP)
     e.press_car_button(8)  # 탄 손님이 8층을 누름
-    e.press_hall_button(5, Direction.DOWN)  # 내려갈 손님은 이 카를 타면 안 된다
+    e.assign_hall_call(5, Direction.DOWN)  # 내려갈 손님은 이 카를 타면 안 된다
     assert e.hall_calls  # 남아 있음
     run_until_idle(e)
     assert stops(e) == [5, 8, 5]
@@ -283,7 +283,7 @@ def test_same_floor_call_while_closing_reopens_doors(building):
     e = _open_at(building, 3, Direction.UP)
     e.tick(DWELL + 400)  # 닫히기 시작한 지 400ms
     assert e.state is S.DOORS_CLOSING
-    e.press_hall_button(3, Direction.UP)
+    e.assign_hall_call(3, Direction.UP)
     assert e.state is S.DOORS_OPENING
     e.tick(399)  # 닫힌 만큼(400ms)만 다시 열면 된다
     assert e.state is S.DOORS_OPENING
@@ -304,7 +304,7 @@ def test_hall_call_while_open_without_direction_sets_direction(building):
     e = make(building, start=4)
     e.press_car_button(4)  # 다른 호출이 없어 방향 없이 문을 연다
     assert e.direction is Direction.NONE
-    e.press_hall_button(4, Direction.DOWN)
+    e.assign_hall_call(4, Direction.DOWN)
     assert e.direction is Direction.DOWN
     assert not e.hall_calls
 
@@ -323,9 +323,9 @@ def test_duplicate_car_call_is_stored_once(building):
 
 def test_duplicate_hall_call_is_stored_once(building):
     e = make(building)
-    e.press_hall_button(6, Direction.DOWN)
+    e.assign_hall_call(6, Direction.DOWN)
     e.tick(TRAVEL)
-    e.press_hall_button(6, Direction.DOWN)
+    e.assign_hall_call(6, Direction.DOWN)
     assert len(e.hall_calls) == 1
     run_until_idle(e)
     assert stops(e) == [6]
@@ -334,7 +334,7 @@ def test_duplicate_hall_call_is_stored_once(building):
 def test_car_call_and_hall_call_same_floor_stop_once(building):
     e = make(building)
     e.press_car_button(5)
-    e.press_hall_button(5, Direction.UP)
+    e.assign_hall_call(5, Direction.UP)
     run_until_idle(e)
     assert stops(e) == [5]
 
@@ -347,7 +347,7 @@ def test_large_tick_equals_many_small_ticks(building):
         e = make(building)
         e.press_car_button(9)
         e.press_car_button(3)
-        e.press_hall_button(6, Direction.DOWN)
+        e.assign_hall_call(6, Direction.DOWN)
         for _ in range(60_000 // step_ms):
             e.tick(step_ms)
         return e.history

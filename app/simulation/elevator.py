@@ -2,7 +2,7 @@
 
 상태는 두 가지 사건으로만 바뀐다.
 - 시간 경과: `tick(dt_ms)`. 이동, 문 열림/닫힘처럼 시간이 걸리는 일이 끝나면 다음 상태로 간다.
-- 호출 입력: `press_car_button`, `press_hall_button`. 대기 중이면 곧바로 출발하고,
+- 호출 입력: `press_car_button`, `assign_hall_call`. 대기 중이면 곧바로 출발하고,
   문이 열려 있는 층의 호출이면 그 자리에서 처리한다.
 
 실제 시계(time.time), I/O, asyncio에 의존하지 않는다. 같은 입력을 같은 순서로 주면
@@ -73,6 +73,11 @@ class Elevator:
         return frozenset(self._hall_calls)
 
     @property
+    def is_idle(self) -> bool:
+        """대기 중이고 처리할 호출이 하나도 없는가."""
+        return self.state is ElevatorState.IDLE and not self._car_calls and not self._hall_calls
+
+    @property
     def position(self) -> float:
         """화면 표시용 위치(층 단위 실수). 이동 중이면 층 사이 값이 나온다."""
         if self.state is ElevatorState.MOVING_UP:
@@ -92,7 +97,12 @@ class Elevator:
         self._car_calls.add(floor)
         self._on_new_call()
 
-    def press_hall_button(self, floor: int, direction: Direction) -> None:
+    def assign_hall_call(self, floor: int, direction: Direction) -> None:
+        """이 카에 홀 호출을 맡긴다.
+
+        홀 버튼은 건물에 있고, 여러 대 중 어느 카가 갈지는 배차 전략이 정한다
+        (`Simulation.press_hall_button`). 카는 맡은 홀 호출만 처리한다.
+        """
         self.building.validate_hall_call(floor, direction)
         self._hall_calls.add(HallCall(floor, direction))
         self._on_new_call()
@@ -102,7 +112,7 @@ class Elevator:
             case CarCall(floor=floor):
                 self.press_car_button(floor)
             case HallCall(floor=floor, direction=direction):
-                self.press_hall_button(floor, direction)
+                self.assign_hall_call(floor, direction)
 
     def _on_new_call(self) -> None:
         if self.state is ElevatorState.IDLE:
