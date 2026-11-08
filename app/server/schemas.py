@@ -3,6 +3,8 @@
 from pydantic import BaseModel, ConfigDict
 
 from app.simulation import Direction, Elevator, ElevatorState, HallCall, Simulation
+from app.simulation.monitor import ServiceEvent, ServiceKind, Severity
+from app.simulation.types import Fault
 
 
 class HallCallView(BaseModel):
@@ -18,6 +20,19 @@ class ElevatorView(BaseModel):
     direction: Direction
     car_calls: list[int]
     hall_calls: list[HallCallView]
+    in_service: bool
+    maintenance_requested: bool
+    # 주입된 고장 (데모용으로 보여 준다. 시스템은 감지 전까지 이 값을 모른다)
+    fault: Fault | None
+
+
+class ServiceEventView(BaseModel):
+    time_ms: int
+    car: int
+    kind: ServiceKind
+    detail: str
+    severity: Severity | None
+    message: str
 
 
 class StateSnapshot(BaseModel):
@@ -27,6 +42,7 @@ class StateSnapshot(BaseModel):
     num_floors: int
     viewers: int
     elevators: list[ElevatorView]
+    service_log: list[ServiceEventView]  # 최근 서비스 기록 (오래된 것부터)
 
 
 def _hall_views(calls: frozenset[HallCall]) -> list[HallCallView]:
@@ -35,7 +51,7 @@ def _hall_views(calls: frozenset[HallCall]) -> list[HallCallView]:
     return [HallCallView(floor=c.floor, direction=c.direction) for c in ordered]
 
 
-def _elevator_view(index: int, car: Elevator) -> ElevatorView:
+def _elevator_view(index: int, car: Elevator, maintenance: bool) -> ElevatorView:
     return ElevatorView(
         id=index,
         floor=car.floor,
@@ -44,15 +60,24 @@ def _elevator_view(index: int, car: Elevator) -> ElevatorView:
         direction=car.direction,
         car_calls=sorted(car.car_calls),
         hall_calls=_hall_views(car.hall_calls),
+        in_service=car.in_service,
+        maintenance_requested=maintenance,
+        fault=car.fault,
     )
 
 
-def snapshot_of(simulation: Simulation, viewers: int) -> StateSnapshot:
+def snapshot_of(
+    simulation: Simulation, viewers: int, service: list[ServiceEvent] | None = None
+) -> StateSnapshot:
     return StateSnapshot(
         time_ms=simulation.now_ms,
         num_floors=simulation.building.num_floors,
         viewers=viewers,
-        elevators=[_elevator_view(i, car) for i, car in enumerate(simulation.elevators)],
+        elevators=[
+            _elevator_view(i, car, simulation.is_maintenance_requested(i))
+            for i, car in enumerate(simulation.elevators)
+        ],
+        service_log=[ServiceEventView(**vars(e)) for e in service or []],
     )
 
 
@@ -70,4 +95,10 @@ class CarCallRequest(BaseModel):
 
 
 class HallCallResponse(BaseModel):
-    car: int  # 배차된 카 번호
+    car: int | None  # 배차된 카 번호. 운행 중인 카가 없으면 None (복귀하면 배차)
+
+
+class FaultRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fault: Fault

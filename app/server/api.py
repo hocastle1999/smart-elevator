@@ -7,11 +7,13 @@ import math
 
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, status
 
+from app.server.admin import require_admin
 from app.server.broadcast import serve_client
 from app.server.rate_limit import RateLimiter
 from app.server.runner import SimulationRunner
 from app.server.schemas import (
     CarCallRequest,
+    FaultRequest,
     HallCallRequest,
     HallCallResponse,
     StateSnapshot,
@@ -98,6 +100,47 @@ async def press_car_button(car: int, body: CarCallRequest, request: Request) -> 
         simulation.press_car_button(car, body.floor)
     except ValueError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)) from e
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+# ---------------------------------------------------------------------- 관리 (6단계)
+
+
+def _admin_car(request: Request, car: int) -> SimulationRunner:
+    require_admin(request)
+    runner = _runner(request)
+    if not 0 <= car < len(runner.simulation.elevators):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"{car}번 카는 없습니다.")
+    return runner
+
+
+@router.post("/api/elevators/{car}/fault", status_code=status.HTTP_202_ACCEPTED, tags=["admin"])
+async def inject_fault(car: int, body: FaultRequest, request: Request) -> Response:
+    """고장을 주입한다 (데모, 관리자). 시스템은 감지 규칙으로 알아챌 때까지 모른다."""
+    _admin_car(request, car).simulation.inject_fault(car, body.fault)
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+@router.post("/api/elevators/{car}/repair", status_code=status.HTTP_202_ACCEPTED, tags=["admin"])
+async def repair(car: int, request: Request) -> Response:
+    """고장을 고친다. 운행 중지 상태면 복귀(/return)는 따로 한다."""
+    _admin_car(request, car).simulation.repair(car)
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+@router.post(
+    "/api/elevators/{car}/maintenance", status_code=status.HTTP_202_ACCEPTED, tags=["admin"]
+)
+async def request_maintenance(car: int, request: Request) -> Response:
+    """점검 요청: 새 호출을 받지 않고, 맡은 일을 끝내면 운행에서 뺀다."""
+    _admin_car(request, car).simulation.request_maintenance(car)
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+@router.post("/api/elevators/{car}/return", status_code=status.HTTP_202_ACCEPTED, tags=["admin"])
+async def return_to_service(car: int, request: Request) -> Response:
+    """운행에 복귀시킨다. 그동안 배차하지 못한 호출을 다시 배차한다."""
+    _admin_car(request, car).simulation.return_to_service(car)
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
 

@@ -50,6 +50,16 @@
   .car::after { right: 0; transform: translateX(100%); }
   .car.doors-closed::before, .car.doors-closed::after { transform: translateX(0); opacity: 0.35; }
   .car span { position: relative; z-index: 1; }
+  .car.oos { background: var(--danger); }
+  .car.oos::before, .car.oos::after { opacity: 0; }
+  .shaft-state.warn { color: var(--danger); font-weight: 600; }
+  .admin { display: none; margin-top: 6px; gap: 4px; flex-direction: column; }
+  body.admin-on .admin { display: flex; }
+  .admin select, .admin button { font-size: 11px; height: 24px; border-radius: 4px;
+           border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  #admin-box { margin-top: 12px; font-size: 12px; color: var(--muted); }
+  #admin-box input { width: 100%; height: 28px; margin-top: 4px; border-radius: 4px;
+           border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 0 6px; }
   .shaft-title { text-align: center; font-weight: 600; margin-top: 6px; }
   .shaft-state { text-align: center; font-size: 11px; color: var(--muted); height: 16px; }
   .panel { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; margin-top: 6px; }
@@ -76,6 +86,10 @@
   <section class="card" id="side">
     <h2>기록</h2>
     <ul id="log"></ul>
+    <div id="admin-box">
+      관리자 토큰 (고장 주입, 점검용. 서버에 ADMIN_TOKEN이 있을 때만 동작)
+      <input id="admin-token" type="password" autocomplete="off" placeholder="토큰을 넣으면 관리 버튼이 보입니다">
+    </div>
     <p class="help">
       층의 ▲▼는 홀 호출(배차 전략이 카를 고름), 각 카 아래 숫자는 카 안의 목적층 버튼입니다.
       시뮬레이션 하나를 모든 접속자가 함께 봅니다.
@@ -89,6 +103,12 @@ const STATE_KO = {
   DOORS_OPENING: "문 열림 중", DOORS_OPEN: "문 열림", DOORS_CLOSING: "문 닫힘 중",
 };
 const ARROW = { UP: "▲", DOWN: "▼", NONE: "" };
+const FAULT_KO = { DOOR_SENSOR: "문 센서", STALL: "층 사이 멈춤", SLOW_MOTOR: "모터 저하" };
+const KIND_KO = {
+  FAULT: "고장 발생", ALERT: "이상 감지", OUT_OF_SERVICE: "운행 중지",
+  MAINTENANCE_REQUEST: "점검 요청", REPAIR: "수리 완료", RETURN: "운행 복귀",
+};
+const seenService = new Set();  // 이미 기록에 쓴 서비스 기록 (같은 것을 두 번 쓰지 않게)
 let built = null;  // 그린 건물 크기 (층 수, 카 수). 바뀌면 다시 그린다.
 const ui = { hall: {}, assigned: {}, cars: [], states: [], carBtns: [] };
 
@@ -106,10 +126,12 @@ function log(text, isError) {
   while (list.children.length > 50) list.lastChild.remove();
 }
 
-async function post(url, body) {
-  const res = await fetch(url, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  });
+function adminToken() { return document.getElementById("admin-token").value.trim(); }
+
+async function post(url, body, admin) {
+  const headers = { "Content-Type": "application/json" };
+  if (admin) headers["X-Admin-Token"] = adminToken();
+  const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(body ?? {}) });
   if (res.ok) {
     const text = await res.text();
     return text ? JSON.parse(text) : null;
@@ -130,6 +152,29 @@ async function pressCar(car, floor) {
     await post(`/api/elevators/${car}/car-calls`, { floor });
     log(`${car + 1}호기 안에서 ${floor}층`);
   } catch (e) { log(e.message, true); }
+}
+
+async function adminAction(car, action, body) {
+  try {
+    await post(`/api/elevators/${car}/${action}`, body, true);
+  } catch (e) { log(e.message, true); }
+}
+
+function buildAdmin(c) {
+  const box = el("div", "admin");
+  const select = el("select");
+  for (const [value, label] of Object.entries(FAULT_KO)) {
+    const o = el("option", "", label); o.value = value; select.append(o);
+  }
+  const buttons = [
+    ["고장 주입", () => adminAction(c, "fault", { fault: select.value })],
+    ["수리", () => adminAction(c, "repair")],
+    ["점검 요청", () => adminAction(c, "maintenance")],
+    ["운행 복귀", () => adminAction(c, "return")],
+  ];
+  box.append(select);
+  for (const [label, fn] of buttons) { const b = el("button", "", label); b.onclick = fn; box.append(b); }
+  return box;
 }
 
 function build(numFloors, numCars) {
@@ -174,7 +219,7 @@ function build(numFloors, numCars) {
       btns[f] = b;
       panel.append(b);
     }
-    col.append(panel);
+    col.append(panel, buildAdmin(c));
     root.append(col);
     ui.cars.push(car); ui.states.push(state); ui.carBtns.push(btns);
   }
@@ -192,13 +237,26 @@ function render(s) {
     ui.cars[i].style.transform = `translateY(${-(e.position - 1) * rowPx}px)`;
     const open = e.state === "DOORS_OPEN" || e.state === "DOORS_OPENING";
     ui.cars[i].classList.toggle("doors-closed", !open);
-    ui.cars[i].firstChild.textContent = `${i + 1}${ARROW[e.direction]}`;
-    ui.states[i].textContent = `${STATE_KO[e.state]} · ${e.floor}층`;
+    ui.cars[i].classList.toggle("oos", !e.in_service);
+    ui.cars[i].firstChild.textContent = e.in_service ? `${i + 1}${ARROW[e.direction]}` : `${i + 1}✕`;
+    let status = `${e.in_service ? STATE_KO[e.state] : "운행 중지"} · ${e.floor}층`;
+    if (e.maintenance_requested) status += " · 점검 대기";
+    if (e.fault) status += ` · ⚠ ${FAULT_KO[e.fault]}`;
+    ui.states[i].textContent = status;
+    ui.states[i].classList.toggle("warn", !e.in_service || !!e.fault);
     const calls = new Set(e.car_calls);
     for (const [f, b] of Object.entries(ui.carBtns[i])) b.classList.toggle("lit", calls.has(+f));
     for (const h of e.hall_calls) lit.set(`${h.floor}-${h.direction}`, i);
   });
   for (const [key, b] of Object.entries(ui.hall)) b.classList.toggle("lit", lit.has(key));
+  for (const ev of s.service_log) {
+    const key = `${ev.time_ms}-${ev.car}-${ev.kind}-${ev.detail}`;
+    if (seenService.has(key)) continue;
+    seenService.add(key);
+    const what = ev.kind === "FAULT" ? `${KIND_KO.FAULT}(${FAULT_KO[ev.detail] ?? ev.detail})`
+      : ev.kind === "ALERT" ? `${KIND_KO.ALERT}: ${ev.message || ev.detail}` : KIND_KO[ev.kind];
+    log(`[${formatTime(ev.time_ms)}] ${ev.car + 1}호기 ${what}`, ev.kind === "ALERT" || ev.kind === "OUT_OF_SERVICE");
+  }
   for (const [f, a] of Object.entries(ui.assigned)) {
     const cars = ["UP", "DOWN"].filter((d) => lit.has(`${f}-${d}`)).map((d) => lit.get(`${f}-${d}`) + 1);
     a.textContent = cars.length ? `→ ${[...new Set(cars)].join(",")}호기` : "";
@@ -224,6 +282,15 @@ function connect() {
     retryMs = Math.min(retryMs * 2, 10000);
   };
 }
+// 관리자 토큰은 이 탭에서만 기억한다 (sessionStorage: 탭을 닫으면 사라짐).
+const tokenInput = document.getElementById("admin-token");
+try { tokenInput.value = sessionStorage.getItem("adminToken") ?? ""; } catch {}
+function syncAdmin() {
+  document.body.classList.toggle("admin-on", adminToken() !== "");
+  try { sessionStorage.setItem("adminToken", adminToken()); } catch {}
+}
+tokenInput.addEventListener("input", syncAdmin);
+syncAdmin();
 connect();
 </script>
 </body>

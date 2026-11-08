@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 
 from app.db.config import DatabaseSettings, create_db_engine
 from app.db.recorder import LiveRecorder
+from app.server.admin import AdminSettings
 from app.server.api import router
 from app.server.broadcast import Broadcaster
 from app.server.rate_limit import RateLimiter
@@ -20,10 +21,13 @@ INDEX_HTML = Path(__file__).parent / "static" / "index.html"
 
 
 def create_app(
-    settings: ServerSettings | None = None, db_settings: DatabaseSettings | None = None
+    settings: ServerSettings | None = None,
+    db_settings: DatabaseSettings | None = None,
+    admin_settings: AdminSettings | None = None,
 ) -> FastAPI:
     """설정을 받아 앱을 만든다. 테스트는 설정을 바꿔 새 앱을 만든다."""
     settings = settings or ServerSettings.from_env()
+    admin_settings = admin_settings or AdminSettings()
     db_settings = db_settings or DatabaseSettings()
     # DB는 선택 사항이다. 없으면 기록과 통계 API만 빠지고 시뮬레이션과 화면은 그대로 돈다.
     engine = create_db_engine(db_settings) if db_settings.db_enabled else None
@@ -46,6 +50,7 @@ def create_app(
     app.state.settings = settings
     app.state.runner = runner
     app.state.db_engine = engine
+    app.state.admin_settings = admin_settings
     app.state.rate_limiter = RateLimiter(settings.calls_per_window, settings.rate_window_ms / 1000)
     app.include_router(router)
     app.include_router(stats_router)

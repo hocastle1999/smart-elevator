@@ -12,12 +12,14 @@ sim_ms_per_tick만큼 진행"을 맡는다. 그래서 엔진은 그대로 두고
 import asyncio
 import contextlib
 import logging
+from collections import deque
 
 from app.db.recorder import LiveRecorder
 from app.server.broadcast import Broadcaster
 from app.server.schemas import StateSnapshot, snapshot_of
 from app.server.settings import ServerSettings
 from app.simulation import Building, Simulation
+from app.simulation.monitor import Monitor, ServiceEvent
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,10 @@ class SimulationRunner:
         self.simulation = Simulation(
             Building(num_floors=settings.num_floors), num_elevators=settings.num_elevators
         )
+        # 이상 감지 (6단계): critical 알림이 나면 그 카를 자동으로 운행에서 뺀다.
+        self.monitor = Monitor(self.simulation)
+        # 화면에 보여 줄 최근 서비스 기록 (고장, 감지, 운행 중지 등)
+        self.recent_service: deque[ServiceEvent] = deque(maxlen=20)
         self.lagged_ticks = 0  # 제시간에 돌지 못한 tick 수 (서버 과부하 지표)
         self._task: asyncio.Task[None] | None = None
         self._flush_task: asyncio.Task[None] | None = None
@@ -45,15 +51,19 @@ class SimulationRunner:
         return self._task is not None and not self._task.done()
 
     def snapshot(self) -> StateSnapshot:
-        return snapshot_of(self.simulation, viewers=self.broadcaster.count)
+        return snapshot_of(
+            self.simulation, viewers=self.broadcaster.count, service=list(self.recent_service)
+        )
 
     def tick_once(self) -> None:
         """시뮬레이션을 한 tick 진행하고 모든 접속자에게 새 상태를 보낸다."""
         self.simulation.step(self.settings.sim_ms_per_tick)
         # 오래 도는 서버라 기록을 쌓아 두지 않는다: 상태 변화는 저장 버퍼로 옮기거나(DB가 있으면)
         # 버리고, 배차 기록도 비운다. 그대로 두면 메모리가 끝없이 늘어난다.
+        service = self.simulation.drain_service_log()
+        self.recent_service.extend(service)
         if self.recorder is not None and self.recorder.run_id is not None:
-            self.recorder.collect(self.simulation)
+            self.recorder.collect(self.simulation, service)
         else:
             for car in self.simulation.elevators:
                 car.drain_history()
@@ -114,16 +124,16 @@ class SimulationRunner:
         recorder = self.recorder
         if recorder is None or recorder.run_id is None:
             return
-        rows = recorder.take()  # 루프 스레드에서 꺼낸다. 이후 쌓이는 기록은 새 버퍼로 간다.
-        if not rows:
+        rows, service = recorder.take()  # 루프 스레드에서 꺼낸다. 이후 기록은 새 버퍼로 간다.
+        if not rows and not service:
             return
         try:
-            await asyncio.to_thread(recorder.write, rows, self.simulation.now_ms)
+            await asyncio.to_thread(recorder.write, rows, self.simulation.now_ms, service)
             recorder.last_error = None
         except Exception as e:
             # DB가 잠시 죽어도 시뮬레이션은 계속 돈다. 기록은 버퍼로 되돌려 다음에 다시 시도한다.
             logger.warning("운행 기록 저장 실패, 다음에 다시 시도합니다: %r", e)
-            recorder.give_back(rows)
+            recorder.give_back(rows, service)
             recorder.last_error = repr(e)
 
     # ------------------------------------------------------------------ 시작과 정지
