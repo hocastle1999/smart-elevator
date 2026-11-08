@@ -10,12 +10,13 @@
   - 기능 단위로 작게 나눠 진행하고 커밋도 그 단위로 나눈다.
 - 실제로 겪은 문제는 `docs/troubleshooting.md`에 문제, 원인, 해결, 배운 점으로 남긴다.
 - 설계 결정은 `docs/design.md`를 갱신한다. 상태나 전이를 바꾸면 Mermaid 다이어그램도 고친다.
-- 진행 단계는 README "로드맵"을 따른다. 현재 4단계(승객, 배차 전략 비교)까지 완료.
+- 진행 단계는 README "로드맵"을 따른다. 현재 5단계(운행 기록 저장, SQL 통계)까지 완료.
 - 사용자와의 대화와 문서는 한국어로 작성한다. 코드 식별자는 영어, 주석은 한국어로 쓴다.
 
 ## 기술 스택
 - Python 3.11 (`.python-version`)
 - 엔진(`app/simulation`)은 표준 라이브러리만 쓴다. 서버(`app/server`)는 FastAPI, uvicorn(WebSocket).
+- DB(선택): MySQL 8.0(로컬은 Windows 서비스 `MySQL80`), SQLAlchemy 2.x **Core**(ORM 아님), PyMySQL, Alembic, pydantic-settings(`.env`의 `DB_*`)
 - 테스트 클라이언트는 `httpx2` (Starlette 1.10부터 `httpx`는 deprecated)
 - pytest, ruff, GitHub Actions
 
@@ -24,6 +25,9 @@
 - 의존성 설치: `.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt`
 - 테스트: `.\.venv\Scripts\python.exe -m pytest -q`
 - 서버: `.\.venv\Scripts\python.exe -m uvicorn app.main:app` (화면 http://localhost:8000). 설정은 `SIM_*` 환경 변수 (README 표)
+- DB 준비(최초 1회): root로 `scripts/init_db.sql` 실행(비밀번호를 바꿔서) → `.env.example`을 `.env`로 복사 → `.\.venv\Scripts\alembic.exe upgrade head`
+- 스키마 변경: `app/db/tables.py` 수정 → `.\.venv\Scripts\alembic.exe revision --autogenerate -m "설명"` → 생성 파일을 읽고 고친 뒤 `upgrade head` → `downgrade -1` → `upgrade head` 왕복, `alembic.exe check`로 모델과 DB 일치 확인
+  - `alembic.ini`는 ASCII만 쓴다 (Windows에서 cp949로 읽혀 한글이 깨진다).
 - 린트/포맷: `.\.venv\Scripts\ruff.exe check .` / `.\.venv\Scripts\ruff.exe format .`
 - 커밋 전에는 테스트, 린트, 포맷 검사를 모두 통과시킨다. CI(`.github/workflows/ci.yml`)도 같은 검사를 한다.
 
@@ -46,8 +50,14 @@
   - `broadcast.py`: 접속자마다 크기 1 큐(최신 상태만) + 전송 태스크. 방송은 기다리지 않는다.
   - `rate_limit.py`: 접속자(IP)별 슬라이딩 윈도 로그. 서버 메모리라 서버 여러 대면 공유되지 않는다.
   - `api.py`: REST와 `/ws`. `schemas.py`: Pydantic 모델(요청은 `extra="forbid"`), 상태 스냅샷.
-- `app/main.py`: `create_app(settings)`. 테스트는 설정을 바꿔 새 앱을 만든다. `app/static/index.html`: 한 페이지 화면(바닐라 JS).
+- `app/db/`: 운행 기록 (5단계). `config.py`(`DatabaseSettings`, `create_db_engine`, 연결마다 time_zone UTC), `tables.py`(Core 테이블, 이름 규칙), `recorder.py`(`save_run`, `LiveRecorder`), `stats.py`(윈도 함수 SQL, `text()` + 바인드 파라미터).
+  - 백분위수는 nearest-rank(`ROW_NUMBER` + `COUNT(*) OVER`, `CEIL(0.95 * n)`)로 파이썬 `percentile`과 같은 정의를 쓴다. 한쪽을 바꾸면 다른 쪽도 바꾼다(테스트가 비교한다).
+  - 실시간 기록은 write-behind: 루프에서는 `collect`(메모리만), 저장은 `asyncio.to_thread(write)`. 실패하면 `give_back`. 재시도는 자연키 + `ON DUPLICATE KEY UPDATE`로 멱등.
+- `app/server/stats_api.py`: 통계 API. 핸들러는 일부러 `def`(블로킹 DB I/O를 스레드 풀에서)이고, 공유 시뮬레이션을 만지지 않는다.
+- `app/main.py`: `create_app(settings, db_settings)`. DB가 꺼져 있으면(`DB_ENABLED=false`) 기록과 통계 API만 빠진다(통계 API는 503). 테스트는 설정을 바꿔 새 앱을 만든다. `app/static/index.html`: 한 페이지 화면(바닐라 JS).
 - `tests/`: pytest. 공용 도우미(`stops`, `run_until_idle`, 시간 상수)는 `tests/helpers.py`.
+  - `tests/conftest.py`가 import 전에 `DB_ENABLED=false`, `DB_NAME=smart_elevator_test`(`TEST_DB_NAME`)를 넣는다. DB 테스트(`tests/test_db.py`)만 `db` 픽스처로 DB를 켜고, 세션 시작 때 마이그레이션을 base → head로 다시 만든다. 이름이 `_test`로 끝나지 않는 DB는 거부한다. 저장 코드가 스스로 커밋하므로 테스트마다 `DELETE FROM simulation_runs`(CASCADE)로 정리한다.
+  - CI는 MySQL 8.0 서비스 컨테이너를 띄운다(`.github/workflows/ci.yml`).
   - API 테스트는 `run_loop=False`로 앱을 만들고 `runner.tick_once()`로 시간을 진행한다. 실제 루프가 필요한 테스트만 `with TestClient(app)`로 lifespan을 돌린다.
 - `scripts/compare_strategies.py`: 배차 전략 비교 실험. `python -m scripts.compare_strategies --output 파일`. 결과 해석은 `docs/experiments.md`. 전략이나 엔진 동작을 바꾸면 다시 돌려 문서의 숫자를 갱신한다.
 - `docs/design.md`: 상태 머신 다이어그램과 설계 결정
@@ -60,6 +70,8 @@
 - 파일은 `encoding="utf-8"`로 연다. Windows 기본 인코딩(cp949)으로 쓰면 한글이 깨진다 (출력 리디렉션 `>`도 마찬가지).
 - 배차 전략이 엔진 상태(호출 집합 등)를 읽을 때는 그 상태가 언제 바뀌는지 확인한다. 홀 호출은 문을 열 때 지워진다 (docs/troubleshooting.md).
 - 새 상태 전이를 추가하면 그 전이를 직접 일으키는 테스트를 함께 쓴다.
-- 비밀 정보는 `.env`에만 둔다. 코드, 문서, 커밋에 넣지 않는다.
+- 오래 도는 서버에서 쌓이기만 하는 리스트를 만들지 않는다. 엔진의 `history`, `assignments`는 서버 tick마다 비운다 (docs/troubleshooting.md).
+- 인덱스를 추가하면 `EXPLAIN`으로 실제로 쓰이는지 확인한다. 윈도 함수의 정렬에는 인덱스가 쓰이지 않았다 (docs/troubleshooting.md).
+- 비밀 정보는 `.env`에만 둔다. 코드, 문서, 커밋에 넣지 않는다. 새 DB 설정을 추가하면 `.env.example`, README 환경 변수 표, CI의 `env`도 갱신한다.
 - 의존성을 추가하면 버전을 고정해 `requirements.txt`(실행용) 또는 `requirements-dev.txt`(개발용)에 적는다.
 - 커밋 메시지는 `feat: ...`, `fix: ...`, `docs: ...`, `test: ...`, `chore: ...` 형식, 내용은 한국어.

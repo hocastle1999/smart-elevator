@@ -19,7 +19,7 @@
 | 2 | 여러 대 + 배차 전략 인터페이스(Strategy 패턴) + 가장 가까운 차(Nearest Car) | ✅ 완료 |
 | 3 | 실시간 서버: asyncio 시뮬레이션 루프, REST로 호출, WebSocket 상태 방송, 간단한 화면 한 페이지 | ✅ 완료 |
 | 4 | 배차 알고리즘 2~3개(Nearest Car, 방향 일치·도착 예상시간 비용 기반, 목적층 예약 방식)와 교통 패턴(출근 상향 피크, 점심, 퇴근 하향 피크, 포아송 도착) 실험. 같은 시드로 평균·p95 대기시간과 이동 거리를 비교한 문서 | ✅ 완료 |
-| 5 | 운행 이벤트를 MySQL에 저장하고 통계 API 제공 (윈도우 함수 등 SQL 분석) | 예정 |
+| 5 | 운행 이벤트를 MySQL에 저장하고 통계 API 제공 (윈도우 함수 등 SQL 분석) | ✅ 완료 |
 | 6 | 고장 주입과 이상 감지 규칙, 점검 관리 | 예정 |
 | 7 | 배포 | 예정 |
 
@@ -86,6 +86,22 @@ print([(a.time_ms, a.call.floor, a.car) for a in sim.assignments])
 
 모든 상황에서 이기는 전략은 없습니다. 목적층 예약은 출근 혼잡에서 처리 용량을 크게 늘리지만, 점심과 퇴근에는 배정된 카만 탈 수 있다는 제약 때문에 오히려 불리합니다.
 
+## 5단계: 운행 기록 저장과 SQL 통계
+
+- **저장**: 실험 실행은 끝난 뒤 한 트랜잭션으로(`--save`), 실시간 서버는 메모리 버퍼에 모았다가 5초마다 다른 스레드에서 묶어서(write-behind) MySQL에 저장합니다. DB가 죽어도 시뮬레이션은 멈추지 않습니다.
+- **통계 API**: 윈도 함수로 p95 대기 시간(`ROW_NUMBER`), 카별 상태 시간 비율(`LEAD`, 집계 위의 윈도), 시간대별 이동 평균(`ROWS BETWEEN`), 층 순위(`RANK`)를 냅니다.
+- **검증**: SQL로 구한 값이 파이썬 계산과 정확히 같습니다. 4단계 실험 135회를 저장하면 `GET /api/stats/compare`가 [실험 문서](docs/experiments.md)의 27개 묶음 값을 그대로 재현합니다.
+- DB는 선택 사항입니다. `DB_ENABLED`가 꺼져 있으면 기록과 통계 API만 빠지고 나머지는 그대로 동작합니다.
+
+| API | 내용 |
+|---|---|
+| `GET /api/stats/runs` | 실행 목록 (`source=experiment`/`live`) |
+| `GET /api/stats/runs/{id}` | 대기·이동 시간 평균, p95, 최대 |
+| `GET /api/stats/runs/{id}/cars` | 카별 상태(이동, 문, 대기) 시간과 비율 |
+| `GET /api/stats/runs/{id}/timeline` | 구간별 평균 대기와 이동 평균 |
+| `GET /api/stats/runs/{id}/floors` | 출발 승객이 많은 층 순위 |
+| `GET /api/stats/compare` | 저장된 실험의 전략 비교 |
+
 ## 실행 방법
 
 Windows PowerShell, 프로젝트 루트 기준입니다. Python 3.11이 필요합니다.
@@ -104,6 +120,13 @@ py -3.11 -m venv .venv
 # 배차 전략 비교 실험 (결과를 UTF-8 Markdown으로 저장)
 .\.venv\Scripts\python.exe -m scripts.compare_strategies --output results.md
 
+# (선택) 운행 기록 DB: MySQL 8.0에서 root로 scripts/init_db.sql을 한 번 실행하고
+# .env.example을 .env로 복사해 비밀번호를 채운 뒤 스키마를 만든다
+.\.venv\Scripts\alembic.exe upgrade head
+
+# 실험 결과를 DB에도 저장
+.\.venv\Scripts\python.exe -m scripts.compare_strategies --save --output results.md
+
 # 서버 실행 후 브라우저에서 http://localhost:8000 (API 문서: /docs)
 .\.venv\Scripts\python.exe -m uvicorn app.main:app
 ```
@@ -119,11 +142,13 @@ py -3.11 -m venv .venv
 | `SIM_MAX_CONNECTIONS` | 100 | WebSocket 동시 접속 상한 |
 | `SIM_CALLS_PER_WINDOW` | 10 | 접속자별 호출 허용 횟수 |
 | `SIM_RATE_WINDOW_MS` | 10000 | 위 횟수를 세는 기간 |
+| `SIM_RECORD_FLUSH_MS` | 5000 | 운행 기록을 DB에 묶어서 저장하는 간격 |
+| `DB_ENABLED` | false | 운행 기록 저장과 통계 API 사용 (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`는 .env.example 참고) |
 
 GitHub Actions가 push와 PR마다 같은 검사(ruff check, ruff format --check, pytest)를 실행합니다.
 
 ## 문서
 
-- [docs/design.md](docs/design.md): 상태 머신 다이어그램, LOOK과 SCAN·FCFS 비교, 시간 처리와 결정성, 배차 전략과 Nearest Car, 실시간 서버(공유 방식, 동시성, 방송), 승객 모델과 사건 단위 시간 진행
+- [docs/design.md](docs/design.md): 상태 머신 다이어그램, LOOK과 SCAN·FCFS 비교, 시간 처리와 결정성, 배차 전략과 Nearest Car, 실시간 서버(공유 방식, 동시성, 방송), 승객 모델과 사건 단위 시간 진행, 운행 기록 테이블과 윈도 함수 통계
 - [docs/experiments.md](docs/experiments.md): 배차 전략 비교 실험 결과와 분석
 - [docs/troubleshooting.md](docs/troubleshooting.md): 개발 중 겪은 문제와 해결 기록

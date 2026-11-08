@@ -1,6 +1,6 @@
-# 설계 문서: 엘리베이터 시뮬레이션 (1~4단계)
+# 설계 문서: 엘리베이터 시뮬레이션 (1~5단계)
 
-1단계는 단일 엘리베이터 상태 머신(1~3절), 2단계는 여러 대와 배차 전략(4절), 3단계는 실시간 서버(5절), 4단계는 승객과 배차 전략 비교(6절)입니다. 엔진 코드는 `app/simulation/`에 있습니다. 순수 파이썬이고 I/O, asyncio, 실제 시계에 의존하지 않습니다.
+1단계는 단일 엘리베이터 상태 머신(1~3절), 2단계는 여러 대와 배차 전략(4절), 3단계는 실시간 서버(5절), 4단계는 승객과 배차 전략 비교(6절), 5단계는 운행 기록 저장과 SQL 통계(7절)입니다. 엔진 코드는 `app/simulation/`에 있습니다. 순수 파이썬이고 I/O, asyncio, 실제 시계에 의존하지 않습니다.
 
 ## 1. 상태 머신
 
@@ -291,6 +291,105 @@ sequenceDiagram
 - 4단계: `select(request: CallRequest, elevators, context=None)`. `CallRequest`에 목적층(`destination`)이 추가되었습니다. 목적층 예약 방식(`uses_destination = True`)이면 승객마다 따로 배차합니다. 같은 층·방향 호출이라도 목적층에 따라 다른 카에 배정될 수 있기 때문입니다.
 - Strategy 패턴 덕분에 전략 2개를 추가하면서 `Simulation`의 배차 코드는 `_dispatch` 한 곳만 바꿨습니다.
 
-## 7. 앞으로 바뀔 부분
+## 7. 운행 기록 저장과 SQL 통계 (5단계)
 
-- 5단계: `history`(상태 변화 기록), `assignments`(배차 기록), 승객 기록을 운행 이벤트로 MySQL에 저장하고, SQL로 통계를 냅니다.
+코드는 `app/db/`(설정, 테이블, 저장, 통계 쿼리)와 `app/server/stats_api.py`, 스키마는 Alembic(`migrations/`)입니다.
+
+### 테이블
+
+```mermaid
+erDiagram
+    simulation_runs ||--o{ elevator_events : "상태 변화"
+    simulation_runs ||--o{ passenger_trips : "승객"
+    simulation_runs {
+        BIGINT id PK
+        VARCHAR source "experiment | live"
+        VARCHAR strategy
+        VARCHAR pattern "실험만"
+        DECIMAL rate_per_min "실험만"
+        INT seed "실험만"
+        SMALLINT num_floors
+        SMALLINT num_elevators
+        DATETIME started_at "UTC"
+        BIGINT sim_ms "마지막 시뮬레이션 시각"
+    }
+    elevator_events {
+        BIGINT run_id PK,FK
+        SMALLINT car PK
+        INT seq PK "카별 순번"
+        BIGINT time_ms
+        VARCHAR state
+        SMALLINT floor
+        VARCHAR direction
+    }
+    passenger_trips {
+        BIGINT run_id PK,FK
+        INT passenger_id PK
+        SMALLINT origin
+        SMALLINT destination
+        BIGINT arrival_ms
+        BIGINT board_ms "못 탔으면 NULL"
+        BIGINT alight_ms
+        SMALLINT car
+        BIGINT wait_ms "생성 열"
+        BIGINT journey_ms "생성 열"
+    }
+```
+
+| 결정 | 이유 | 다른 방법과 비교 |
+|---|---|---|
+| **SQLAlchemy Core** (ORM 아님) | 기록은 한 번 쓰고 고치지 않는 로그다. 대량 INSERT와 분석 SQL이 중심이다 | ORM(1번 프로젝트)은 객체 상태를 추적해 변경을 모아 저장하는 데 강하다. 여기서는 그 기능이 필요 없고 비용만 든다 |
+| `elevator_events` 기본키 **(run_id, car, seq)** | InnoDB는 기본키 순서로 행을 저장한다(클러스터형 인덱스). "한 실행의 한 카를 시간순으로" 읽는 쿼리가 디스크를 차례로 읽는다 | 자동 증가 id를 쓰면 여러 카의 행이 섞여 저장되고, 이 순서로 읽으려면 보조 인덱스가 하나 더 필요하다 |
+| `seq` 열 | 같은 ms에 상태가 두 번 바뀔 수 있다(IDLE → MOVING_UP). `time_ms`로는 순서를 정할 수 없다 | |
+| **자연키라 재시도가 안전** | 실시간 저장이 "커밋은 됐는데 응답 직전에 연결이 끊긴" 경우, 같은 행을 다시 보내도 `ON DUPLICATE KEY UPDATE`로 아무것도 바뀌지 않는다(멱등) | `INSERT IGNORE`는 중복 말고 다른 오류(CHECK 위반 등)까지 경고로 바꿔 숨기므로 쓰지 않았다 |
+| `wait_ms`, `journey_ms` **생성 열(STORED)** | 원본 시각에서 DB가 계산하므로 앱이 계산해 넣은 값과 어긋날 수 없다. STORED라 인덱스도 걸 수 있다 | VIRTUAL은 읽을 때마다 계산한다 |
+| 상태·방향은 **VARCHAR + CHECK** | 값 목록을 바꿀 때 CHECK만 바꾸면 된다. MySQL 8.0.16부터 CHECK를 실제로 검사한다 | ENUM은 값을 추가할 때 ALTER TABLE이 필요하고, 정의 순서로 정렬되는 등 헷갈린다 |
+| 실행 삭제는 **ON DELETE CASCADE** | 실행 하나를 지우면 그 기록도 함께 지워진다 | |
+
+### 저장 방식 두 가지
+
+**실험(`save_run`)**: 끝난 실행 하나를 한 트랜잭션으로 저장합니다. 중간에 실패하면 모두 취소되어 "실행은 있는데 기록이 반만 있는" 상태가 남지 않습니다.
+
+- 행을 5000개씩 묶어 넣습니다. 행 목록을 넘기면 SQLAlchemy가 executemany로 실행하고, PyMySQL이 여러 행짜리 `INSERT ... VALUES (...), (...)` 한 문장으로 바꿉니다. 한 행씩 넣으면 행마다 DB 왕복이 생깁니다.
+- 4단계 실험 135회(상태 변화 31만 행, 승객 8만 행)를 저장하는 데 약 18초가 더 걸렸습니다.
+
+**실시간 서버(`LiveRecorder`, write-behind)**: 이벤트 루프에서 DB에 바로 쓰면 응답을 기다리는 동안 시뮬레이션과 방송이 멈춥니다.
+
+```mermaid
+flowchart LR
+    T["tick (루프 스레드)"] -->|collect: 메모리만| B[("버퍼")]
+    F["5초마다 flush (루프)"] -->|take: 버퍼 교체| R["rows"]
+    R -->|asyncio.to_thread| W["write (작업 스레드)<br/>INSERT ... ON DUPLICATE KEY"]
+    W -->|실패| G["give_back: 버퍼 앞에 되돌림"]
+```
+
+- 루프에서는 버퍼에 모으기만 하고(I/O 없음), 저장은 `asyncio.to_thread`로 다른 스레드에서 묶어서 합니다.
+- **DB가 죽어도 시뮬레이션은 계속 돕니다.** 실패한 기록은 버퍼 앞에 되돌려 다음에 다시 시도합니다. 버퍼가 상한(10만 행)을 넘으면 오래된 기록부터 버리고 개수를 셉니다. 메모리를 지키는 것이 기록 완전성보다 우선입니다. 상태는 `/health`의 `recording`(저장 수, 버린 수, 마지막 오류)으로 봅니다.
+- 서버 시작 때 DB에 접속할 수 없으면 기록 없이 시뮬레이션만 돕니다. 데모가 DB 장애로 멈추면 안 되기 때문입니다.
+- **메모리 누수 수정**: 3단계 서버는 카의 상태 변화 기록(`history`)과 배차 기록(`assignments`)을 계속 쌓기만 했습니다. 오래 돌면 메모리가 끝없이 늘어납니다. 이제 tick마다 기록을 꺼내(`drain_history`) 저장 버퍼로 옮기거나, DB가 없으면 버립니다.
+
+### 통계 쿼리 (윈도 함수)
+
+SQL은 `text()`로 직접 씁니다(`app/db/stats.py`). 분석 쿼리는 SQL 자체가 설계의 핵심이라, 쿼리 빌더로 감추기보다 그대로 보이는 편이 읽고 검증하기 쉽습니다. 값은 항상 바인드 파라미터로 넘깁니다.
+
+| API | 쓰는 윈도 함수 | 무엇을 푸는가 |
+|---|---|---|
+| `GET /api/stats/runs/{id}` | `ROW_NUMBER()`, `COUNT(*) OVER ()` | **p95**: MySQL 8.0에는 `PERCENTILE_CONT`가 없다. 순위와 전체 수로 nearest-rank 백분위수(ceil(0.95 × n)번째 값)를 고른다. 파이썬의 `percentile`과 같은 정의라 결과가 정확히 같다 |
+| `GET /api/stats/compare` | `PARTITION BY 패턴, 부하, 전략`, `WINDOW` 절 | 시드 5회의 승객을 묶음별로 모아 p95를 구한다. docs/experiments.md의 27개 묶음 값을 그대로 재현한다 |
+| `GET /api/stats/runs/{id}/cars` | `LEAD(time_ms)`, `SUM(SUM(...)) OVER (PARTITION BY car)` | 기록은 "이 시각부터 이 상태"뿐이다. 상태가 얼마나 이어졌는지는 **다음 행의 시각**에서 뺀다. 마지막 행은 실행의 끝 시각까지로 본다. 비율은 집계 결과 위에 다시 윈도를 건다 |
+| `GET /api/stats/runs/{id}/timeline` | `SUM(...) OVER (ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)` | 5분 구간별 평균 대기와 최근 3구간 이동 평균. 구간 평균을 단순 평균하지 않고 "대기 합 / 승객 수 합"으로 승객 수를 반영한다 |
+| `GET /api/stats/runs/{id}/floors` | `RANK()` | 출발 승객이 많은 층 순위. 동점이면 같은 순위이고 다음 순위는 건너뛴다(1, 2, 2, 4) |
+
+- **통계 핸들러는 `def`(동기)입니다.** PyMySQL은 블로킹 드라이버라 `async def` 안에서 쿼리하면 이벤트 루프 전체가 멈춥니다. `def` 핸들러는 FastAPI가 스레드 풀에서 돌립니다. 대신 이 핸들러들은 공유 시뮬레이션을 만지지 않습니다. 시뮬레이션을 만지는 핸들러는 반대로 반드시 `async def`입니다(5절).
+- 측정(로컬, 실행 135회, 승객 8만 행): 실행 하나의 요약 6ms, 카별 사용 19ms, 전략 비교(전체 실험 승객) 1.6초. 비교 쿼리는 모든 실험 승객을 정렬하므로 데이터가 늘면 같이 느려집니다. 더 커지면 실행이 끝날 때 묶음별 요약을 따로 저장해 두는 방식(사전 집계)으로 바꿉니다.
+
+### 테스트
+
+- 일반 테스트는 DB 없이 돕니다(`DB_ENABLED=false`). DB 테스트만 `smart_elevator_test`를 쓰고, 이름이 `_test`로 끝나지 않으면 거부합니다.
+- 테스트 세션마다 마이그레이션을 base까지 내렸다 head로 올려, 왕복도 함께 검증합니다.
+- 작은 데이터를 직접 넣어 손으로 검산한 값과 비교합니다(p95, `LEAD`로 구한 상태 시간, 가중 이동 평균, `RANK` 동점). 실제 시뮬레이션 결과로는 SQL과 파이썬의 계산이 같은지 확인합니다.
+- CI는 MySQL 8.0 서비스 컨테이너를 띄웁니다.
+
+## 8. 앞으로 바뀔 부분
+
+- 6단계: 고장 주입(문이 안 닫힘, 층 사이 정지 등)과 이상 감지 규칙. 저장된 상태 변화 기록에서 "문이 N초 넘게 열려 있음" 같은 패턴을 SQL로 찾고, 점검 관리 기능을 붙입니다.
