@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Elevator</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --line: #d9dde3; --text: #1d2330; --muted: #6b7380;
+    --shaft: #eef0f3; --car: #2f6fde; --car-door: #9bbcf5; --lit: #f2a516; --danger: #d64545;
+    --row: 44px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --panel: #1c2027; --line: #2e343e; --text: #e6e9ee; --muted: #8b93a1;
+      --shaft: #232830; --car: #4d8af0; --car-door: #2b4f8f; --lit: #f2b33d; --danger: #f07070;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.4 system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: baseline;
+           padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 18px; margin: 0; }
+  .stat { color: var(--muted); }
+  .stat b { color: var(--text); font-variant-numeric: tabular-nums; }
+  #conn.ok b { color: #2e9d57; } #conn.bad b { color: var(--danger); }
+  main { display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  #building { display: flex; gap: 8px; overflow-x: auto; max-width: 100%; }
+  .col { display: flex; flex-direction: column; }
+  .cell { height: var(--row); display: flex; align-items: center; justify-content: center; }
+  .floor-label { width: 32px; font-weight: 600; color: var(--muted); }
+  .hall { gap: 4px; width: 92px; justify-content: flex-start; }
+  .hall-btn { width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--line);
+              background: var(--panel); color: var(--text); cursor: pointer; font-size: 12px; }
+  .hall-btn.lit { background: var(--lit); border-color: var(--lit); color: #1d2330; }
+  .hall-btn:disabled { visibility: hidden; }
+  .assigned { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .shaft { position: relative; width: 64px; background: var(--shaft); border-radius: 4px;
+           background-image: repeating-linear-gradient(to top, transparent 0 calc(var(--row) - 1px),
+             var(--line) calc(var(--row) - 1px) var(--row)); }
+  .car { position: absolute; left: 6px; right: 6px; bottom: 3px; height: calc(var(--row) - 6px);
+         background: var(--car); border-radius: 4px; color: #fff; font-size: 12px; font-weight: 600;
+         display: flex; align-items: center; justify-content: center; overflow: hidden;
+         transition: transform 0.1s linear; }
+  .car::before, .car::after { content: ""; position: absolute; top: 0; bottom: 0; width: 50%;
+         background: var(--car-door); transition: transform 0.4s; }
+  .car::before { left: 0; transform: translateX(-100%); }
+  .car::after { right: 0; transform: translateX(100%); }
+  .car.doors-closed::before, .car.doors-closed::after { transform: translateX(0); opacity: 0.35; }
+  .car span { position: relative; z-index: 1; }
+  .shaft-title { text-align: center; font-weight: 600; margin-top: 6px; }
+  .shaft-state { text-align: center; font-size: 11px; color: var(--muted); height: 16px; }
+  .panel { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; margin-top: 6px; }
+  .car-btn { height: 26px; border-radius: 4px; border: 1px solid var(--line); background: var(--panel);
+             color: var(--text); cursor: pointer; font-size: 12px; }
+  .car-btn.lit { background: var(--lit); border-color: var(--lit); color: #1d2330; }
+  #side { flex: 1 1 260px; min-width: 240px; }
+  #side h2 { font-size: 14px; margin: 0 0 8px; }
+  #log { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow-y: auto; font-size: 13px; }
+  #log li { padding: 3px 0; border-bottom: 1px dashed var(--line); }
+  #log li.err { color: var(--danger); }
+  .help { color: var(--muted); font-size: 12px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Smart Elevator</h1>
+  <span class="stat" id="conn">연결: <b>접속 중…</b></span>
+  <span class="stat">시뮬레이션 시각: <b id="time">-</b></span>
+  <span class="stat">함께 보는 사람: <b id="viewers">-</b></span>
+</header>
+<main>
+  <section class="card"><div id="building"></div></section>
+  <section class="card" id="side">
+    <h2>기록</h2>
+    <ul id="log"></ul>
+    <p class="help">
+      층의 ▲▼는 홀 호출(배차 전략이 카를 고름), 각 카 아래 숫자는 카 안의 목적층 버튼입니다.
+      시뮬레이션 하나를 모든 접속자가 함께 봅니다.
+    </p>
+  </section>
+</main>
+<script>
+"use strict";
+const STATE_KO = {
+  IDLE: "대기", MOVING_UP: "올라가는 중", MOVING_DOWN: "내려가는 중",
+  DOORS_OPENING: "문 열림 중", DOORS_OPEN: "문 열림", DOORS_CLOSING: "문 닫힘 중",
+};
+const ARROW = { UP: "▲", DOWN: "▼", NONE: "" };
+let built = null;  // 그린 건물 크기 (층 수, 카 수). 바뀌면 다시 그린다.
+const ui = { hall: {}, assigned: {}, cars: [], states: [], carBtns: [] };
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function log(text, isError) {
+  const li = el("li", isError ? "err" : "", text);
+  const list = document.getElementById("log");
+  list.prepend(li);
+  while (list.children.length > 50) list.lastChild.remove();
+}
+
+async function post(url, body) {
+  const res = await fetch(url, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (res.ok) {
+    const text = await res.text();
+    return text ? JSON.parse(text) : null;
+  }
+  const data = await res.json().catch(() => ({}));
+  throw new Error(typeof data.detail === "string" ? data.detail : `요청 실패 (${res.status})`);
+}
+
+async function pressHall(floor, direction) {
+  try {
+    const data = await post("/api/hall-calls", { floor, direction });
+    log(`${floor}층 ${ARROW[direction]} 호출 → ${data.car + 1}호기 배차`);
+  } catch (e) { log(e.message, true); }
+}
+
+async function pressCar(car, floor) {
+  try {
+    await post(`/api/elevators/${car}/car-calls`, { floor });
+    log(`${car + 1}호기 안에서 ${floor}층`);
+  } catch (e) { log(e.message, true); }
+}
+
+function build(numFloors, numCars) {
+  const root = document.getElementById("building");
+  root.replaceChildren();
+  ui.hall = {}; ui.assigned = {}; ui.cars = []; ui.states = []; ui.carBtns = [];
+
+  const labels = el("div", "col"), halls = el("div", "col");
+  for (let f = numFloors; f >= 1; f--) {
+    labels.append(el("div", "cell floor-label", f));
+    const row = el("div", "cell hall");
+    for (const dir of ["UP", "DOWN"]) {
+      const b = el("button", "hall-btn", ARROW[dir]);
+      b.title = `${f}층 ${dir === "UP" ? "올라감" : "내려감"}`;
+      b.disabled = (dir === "UP" && f === numFloors) || (dir === "DOWN" && f === 1);
+      b.onclick = () => pressHall(f, dir);
+      ui.hall[`${f}-${dir}`] = b;
+      row.append(b);
+    }
+    const a = el("span", "assigned");
+    ui.assigned[f] = a;
+    row.append(a);
+    halls.append(row);
+  }
+  root.append(labels, halls);
+
+  for (let c = 0; c < numCars; c++) {
+    const col = el("div", "col");
+    const shaft = el("div", "shaft");
+    shaft.style.height = `calc(var(--row) * ${numFloors})`;
+    const car = el("div", "car doors-closed");
+    car.append(el("span", "", `${c + 1}`));
+    shaft.append(car);
+    col.append(shaft, el("div", "shaft-title", `${c + 1}호기`));
+    const state = el("div", "shaft-state", "");
+    col.append(state);
+    const panel = el("div", "panel");
+    const btns = {};
+    for (let f = numFloors; f >= 1; f--) {
+      const b = el("button", "car-btn", f);
+      b.onclick = () => pressCar(c, f);
+      btns[f] = b;
+      panel.append(b);
+    }
+    col.append(panel);
+    root.append(col);
+    ui.cars.push(car); ui.states.push(state); ui.carBtns.push(btns);
+  }
+  built = `${numFloors}x${numCars}`;
+}
+
+function render(s) {
+  if (built !== `${s.num_floors}x${s.elevators.length}`) build(s.num_floors, s.elevators.length);
+  document.getElementById("time").textContent = formatTime(s.time_ms);
+  document.getElementById("viewers").textContent = s.viewers;
+
+  const lit = new Map();  // "층-방향" -> 맡은 카 번호
+  s.elevators.forEach((e, i) => {
+    const rowPx = ui.cars[i].offsetHeight + 6;
+    ui.cars[i].style.transform = `translateY(${-(e.position - 1) * rowPx}px)`;
+    const open = e.state === "DOORS_OPEN" || e.state === "DOORS_OPENING";
+    ui.cars[i].classList.toggle("doors-closed", !open);
+    ui.cars[i].firstChild.textContent = `${i + 1}${ARROW[e.direction]}`;
+    ui.states[i].textContent = `${STATE_KO[e.state]} · ${e.floor}층`;
+    const calls = new Set(e.car_calls);
+    for (const [f, b] of Object.entries(ui.carBtns[i])) b.classList.toggle("lit", calls.has(+f));
+    for (const h of e.hall_calls) lit.set(`${h.floor}-${h.direction}`, i);
+  });
+  for (const [key, b] of Object.entries(ui.hall)) b.classList.toggle("lit", lit.has(key));
+  for (const [f, a] of Object.entries(ui.assigned)) {
+    const cars = ["UP", "DOWN"].filter((d) => lit.has(`${f}-${d}`)).map((d) => lit.get(`${f}-${d}`) + 1);
+    a.textContent = cars.length ? `→ ${[...new Set(cars)].join(",")}호기` : "";
+  }
+}
+
+function formatTime(ms) {
+  const t = Math.floor(ms / 1000), h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, sec = t % 60;
+  return [h, m, sec].map((v) => String(v).padStart(2, "0")).join(":");
+}
+
+// WebSocket: 끊기면 1초부터 최대 10초까지 간격을 늘려 다시 접속한다.
+let retryMs = 1000;
+function connect() {
+  const conn = document.getElementById("conn");
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+  ws.onopen = () => { retryMs = 1000; conn.className = "stat ok"; conn.lastChild.textContent = "연결됨"; };
+  ws.onmessage = (ev) => render(JSON.parse(ev.data));
+  ws.onclose = (ev) => {
+    conn.className = "stat bad";
+    conn.lastChild.textContent = ev.code === 1013 ? "접속자가 많아 대기 중" : "끊김, 다시 연결 중";
+    setTimeout(connect, retryMs);
+    retryMs = Math.min(retryMs * 2, 10000);
+  };
+}
+connect();
+</script>
+</body>
+</html>
