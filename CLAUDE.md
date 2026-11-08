@@ -10,7 +10,7 @@
   - 기능 단위로 작게 나눠 진행하고 커밋도 그 단위로 나눈다.
 - 실제로 겪은 문제는 `docs/troubleshooting.md`에 문제, 원인, 해결, 배운 점으로 남긴다.
 - 설계 결정은 `docs/design.md`를 갱신한다. 상태나 전이를 바꾸면 Mermaid 다이어그램도 고친다.
-- 진행 단계는 README "로드맵"을 따른다. 현재 1단계(단일 엘리베이터 엔진) 완료.
+- 진행 단계는 README "로드맵"을 따른다. 현재 2단계(여러 대 + 배차 전략)까지 완료.
 - 사용자와의 대화와 문서는 한국어로 작성한다. 코드 식별자는 영어, 주석은 한국어로 쓴다.
 
 ## 기술 스택
@@ -31,8 +31,9 @@
   - `types.py`: `Direction`, `ElevatorState`, `HallCall`, `CarCall`
   - `building.py`: `Building` (층은 1층부터 `num_floors`층까지), 호출 검증
   - `config.py`: `ElevatorConfig` (이동, 문 시간. 모두 정수 ms)
-  - `elevator.py`: `Elevator` 상태 머신 (LOOK). 상태 전이는 `_complete_phase`(시간 경과)와 `_on_new_call`(호출 입력) 두 곳에서만 시작된다.
-  - `simulation.py`: `Simulation` (예약된 호출을 정확한 시각에 넣으며 시간 진행)
+  - `elevator.py`: `Elevator` 상태 머신 (LOOK). 맡은 호출(`car_calls`, `hall_calls`)만 보고 움직이며 다른 카를 모른다. 상태 전이는 `_complete_phase`(시간 경과)와 `_on_new_call`(호출 입력) 두 곳에서만 시작된다.
+  - `dispatch.py`: 배차 전략. `DispatchStrategy`(ABC)의 `select(call, elevators) -> 카 번호`를 구현한다. `NearestCar`(적합도 FS). 새 전략은 이 인터페이스로 추가하고 `Simulation`에 분기를 넣지 않는다. 전략도 결정적이어야 한다(동점이면 번호가 작은 카).
+  - `simulation.py`: `Simulation` (여러 대, 시계 보유). 홀 호출은 `press_hall_button` → 전략 → 그 카의 `assign_hall_call`. 카 호출은 `press_car_button(car, floor)`. 배차는 호출 순간 한 번만 하고(정적), 이미 맡은 카가 있으면 다시 배차하지 않는다. 배차 기록은 `assignments`.
   - `traffic.py`: 무작위 호출 발생기. 무작위성은 이 파일에만 있고 `random.Random(seed)`를 쓴다.
 - `tests/`: pytest. 공용 도우미(`stops`, `run_until_idle`, 시간 상수)는 `tests/helpers.py`.
 - `docs/design.md`: 상태 머신 다이어그램과 설계 결정

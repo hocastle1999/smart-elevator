@@ -16,7 +16,7 @@
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | 1 | 단일 엘리베이터 상태 머신 엔진 (LOOK 방식, 결정적 시뮬레이션) | ✅ 완료 |
-| 2 | 여러 대 + 배차 전략 인터페이스(Strategy 패턴) + 가장 가까운 차(Nearest Car) | 예정 |
+| 2 | 여러 대 + 배차 전략 인터페이스(Strategy 패턴) + 가장 가까운 차(Nearest Car) | ✅ 완료 |
 | 3 | 실시간 서버: asyncio 시뮬레이션 루프, REST로 호출, WebSocket 상태 방송, 간단한 화면 한 페이지 | 예정 |
 | 4 | 배차 알고리즘 2~3개(Nearest Car, 방향 일치·도착 예상시간 비용 기반, 목적층 예약 방식)와 교통 패턴(출근 상향 피크, 점심, 퇴근 하향 피크, 포아송 도착) 실험. 같은 시드로 평균·p95 대기시간과 이동 거리를 비교한 문서 | 예정 |
 | 5 | 운행 이벤트를 MySQL에 저장하고 통계 API 제공 (윈도우 함수 등 SQL 분석) | 예정 |
@@ -39,10 +39,26 @@ from app.simulation import Building, Direction, Elevator
 
 e = Elevator(Building(num_floors=10))
 e.press_car_button(6)  # 카 안에서 6층
-e.press_hall_button(4, Direction.DOWN)  # 4층에서 내려가려는 손님
+e.assign_hall_call(4, Direction.DOWN)  # 4층에서 내려가려는 손님
 e.tick(60_000)  # 60초 진행
 print([(s.time_ms, s.state, s.floor) for s in e.history])
 # 6층에 먼저 들르고(4층의 내려가는 손님은 지나침), 돌아오면서 4층에 선다.
+```
+
+## 2단계: 여러 대와 배차 전략
+
+- 홀 호출은 건물(`Simulation.press_hall_button`)이 받아 **배차 전략**이 고른 카에 맡기고, 카 호출은 그 카가 직접 받습니다. 1단계 엔진(LOOK)은 고치지 않고 그대로 씁니다.
+- **Strategy 패턴**: `DispatchStrategy.select(call, elevators)` 하나만 구현하면 새 전략을 끼울 수 있습니다. 4단계에서 알고리즘을 같은 조건으로 바꿔 가며 비교하기 위한 구조입니다.
+- **Nearest Car**: 거리만 보지 않고 진행 방향까지 따진 적합도(FS)로 고릅니다. 같은 방향으로 오는 카가 가장 좋고, 멀어지는 카는 가까워도 가장 나쁩니다.
+
+```python
+from app.simulation import Building, Direction, Simulation
+
+sim = Simulation(Building(num_floors=10), num_elevators=2, start_floors=[1, 10])
+sim.press_hall_button(3, Direction.UP)  # -> 0번 카 (1층에서 대기, 더 가까움)
+sim.press_hall_button(8, Direction.DOWN)  # -> 1번 카 (10층에서 대기, 더 가까움)
+sim.run_until(60_000)
+print([(a.time_ms, a.call.floor, a.car) for a in sim.assignments])
 ```
 
 ## 실행 방법
@@ -65,5 +81,5 @@ GitHub Actions가 push와 PR마다 같은 검사(ruff check, ruff format --check
 
 ## 문서
 
-- [docs/design.md](docs/design.md): 상태 머신 다이어그램, LOOK과 SCAN·FCFS 비교, 시간 처리와 결정성
+- [docs/design.md](docs/design.md): 상태 머신 다이어그램, LOOK과 SCAN·FCFS 비교, 시간 처리와 결정성, 배차 전략과 Nearest Car
 - [docs/troubleshooting.md](docs/troubleshooting.md): 개발 중 겪은 문제와 해결 기록
