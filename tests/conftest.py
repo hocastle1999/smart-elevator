@@ -7,6 +7,7 @@ from pathlib import Path
 # - DB 테스트는 db_settings 픽스처가 명시적으로 켜고, 이름이 _test로 끝나는 DB만 쓴다.
 # 환경 변수는 .env보다 우선한다.
 os.environ["DB_ENABLED"] = "false"
+os.environ["ADMIN_TOKEN"] = ""  # 관리 API는 테스트가 명시적으로 켠다
 os.environ["DB_NAME"] = os.environ.get("TEST_DB_NAME", "smart_elevator_test")
 
 import pytest  # noqa: E402

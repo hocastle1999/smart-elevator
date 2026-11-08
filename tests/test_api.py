@@ -39,7 +39,11 @@ def test_state_describes_building_and_cars(client):
         "direction": "NONE",
         "car_calls": [],
         "hall_calls": [],
+        "in_service": True,
+        "maintenance_requested": False,
+        "fault": None,
     }
+    assert body["service_log"] == []
 
 
 def test_index_page_is_served(client):
@@ -165,3 +169,69 @@ def test_viewer_count_drops_after_disconnect(client):
         ws.receive_json()
         assert client.get("/health").json()["viewers"] == 1
     assert client.get("/health").json()["viewers"] == 0
+
+
+# ---------------------------------------------------------------- 관리 API (6단계)
+
+TOKEN = "test-admin-token"
+
+
+@pytest.fixture
+def admin_client() -> TestClient:
+    from app.server.admin import AdminSettings
+
+    settings = ServerSettings(run_loop=False)
+    return TestClient(create_app(settings, admin_settings=AdminSettings(admin_token=TOKEN)))
+
+
+def admin(client: TestClient, path: str, body: dict | None = None, token: str = TOKEN):
+    return client.post(path, json=body or {}, headers={"X-Admin-Token": token})
+
+
+def test_admin_api_is_closed_without_token_setting(client):
+    assert admin(client, "/api/elevators/0/fault", {"fault": "STALL"}).status_code == 403
+
+
+def test_admin_api_rejects_wrong_token(admin_client):
+    res = admin(admin_client, "/api/elevators/0/fault", {"fault": "STALL"}, token="wrong")
+    assert res.status_code == 401
+    assert admin_client.post("/api/elevators/0/repair").status_code == 401  # 헤더 없음
+
+
+def test_fault_and_repair_are_visible_in_state(admin_client):
+    assert (
+        admin(admin_client, "/api/elevators/1/fault", {"fault": "DOOR_SENSOR"}).status_code == 202
+    )
+    car = admin_client.get("/api/state").json()["elevators"][1]
+    assert car["fault"] == "DOOR_SENSOR" and car["in_service"]  # 감지 전에는 운행 중
+    assert admin(admin_client, "/api/elevators/1/repair").status_code == 202
+    assert admin_client.get("/api/state").json()["elevators"][1]["fault"] is None
+
+
+def test_maintenance_and_return(admin_client):
+    admin(admin_client, "/api/elevators/2/maintenance")
+    car = admin_client.get("/api/state").json()["elevators"][2]
+    assert car["in_service"] is False and car["state"] == "OUT_OF_SERVICE"  # 대기 중이라 바로
+    res = admin_client.post("/api/hall-calls", json={"floor": 5, "direction": "UP"})
+    assert res.json()["car"] != 2
+    admin(admin_client, "/api/elevators/2/return")
+    assert admin_client.get("/api/state").json()["elevators"][2]["in_service"] is True
+
+
+def test_admin_api_validates_input(admin_client):
+    assert admin(admin_client, "/api/elevators/9/repair").status_code == 404
+    assert admin(admin_client, "/api/elevators/0/fault", {"fault": "FIRE"}).status_code == 422
+
+
+def test_service_log_appears_in_state_after_tick(admin_client):
+    admin(admin_client, "/api/elevators/0/fault", {"fault": "SLOW_MOTOR"})
+    runner_of(admin_client).tick_once()
+    log = admin_client.get("/api/state").json()["service_log"]
+    assert [(e["car"], e["kind"], e["detail"]) for e in log] == [(0, "FAULT", "SLOW_MOTOR")]
+
+
+def test_hall_call_without_any_car_in_service_returns_null(admin_client):
+    for car in range(3):
+        admin(admin_client, f"/api/elevators/{car}/maintenance")
+    res = admin_client.post("/api/hall-calls", json={"floor": 4, "direction": "UP"})
+    assert res.status_code == 202 and res.json()["car"] is None

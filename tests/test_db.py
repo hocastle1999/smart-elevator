@@ -13,7 +13,7 @@ from sqlalchemy import Engine, func, select
 
 from app.db import stats
 from app.db.recorder import LiveRecorder, save_run
-from app.db.tables import elevator_events, passenger_trips, simulation_runs
+from app.db.tables import elevator_events, passenger_trips, service_log, simulation_runs
 from app.main import create_app
 from app.server.settings import ServerSettings
 from app.simulation import STRATEGIES, Building, Direction, Simulation
@@ -247,11 +247,12 @@ def test_live_recorder_writes_in_batches_and_continues_seq(db):
     sim.step(5000)
     recorder.collect(sim)
     assert all(not car.history for car in sim.elevators)  # 메모리에서 비운다
-    first = recorder.take()
-    recorder.write(first, sim.now_ms)
+    first, service = recorder.take()
+    recorder.write(first, sim.now_ms, service)
     sim.step(30_000)
     recorder.collect(sim)
-    recorder.write(recorder.take(), sim.now_ms)
+    rows, service = recorder.take()
+    recorder.write(rows, sim.now_ms, service)
     with db.connect() as conn:
         seqs = (
             conn.execute(
@@ -274,7 +275,7 @@ def test_live_recorder_retry_is_idempotent(db):
     sim.press_car_button(0, 4)
     sim.step(20_000)
     recorder.collect(sim)
-    rows = recorder.take()
+    rows, _ = recorder.take()
     recorder.write(rows, sim.now_ms)
     recorder.write(rows, sim.now_ms)  # 응답을 못 받아 같은 행을 다시 보낸 경우
     assert count(db, elevator_events, run_id) == len(rows)
@@ -283,7 +284,7 @@ def test_live_recorder_retry_is_idempotent(db):
 def test_live_recorder_drops_oldest_when_buffer_full():
     recorder = LiveRecorder(engine=None, max_buffer=3)  # type: ignore[arg-type]
     recorder.give_back([{"seq": i} for i in range(5)])
-    assert [r["seq"] for r in recorder.take()] == [2, 3, 4]
+    assert [r["seq"] for r in recorder.take()[0]] == [2, 3, 4]
     assert recorder.dropped == 2
 
 
@@ -335,3 +336,91 @@ def test_live_server_records_events(db, db_settings):
         live = client.get("/api/stats/runs", params={"source": "live"}).json()
         assert [r["id"] for r in live] == [run_id]
     assert count(db, elevator_events, run_id) > 0
+
+
+# ---------------------------------------------------------------- 고장과 점검 (6단계)
+
+
+def test_service_report_matches_simulation(db):
+    from app.simulation.monitor import Monitor, ServiceKind
+    from app.simulation.types import Fault
+
+    sim = Simulation(Building(num_floors=10), num_elevators=2)
+    Monitor(sim)
+    sim.press_car_button(0, 8)
+    sim.step(1000)
+    sim.inject_fault(0, Fault.STALL)
+    sim.step(20_000)
+    sim.repair(0)
+    sim.return_to_service(0)
+    sim.run_until_idle(dt_ms=1000)
+    log = {e.kind: e.time_ms for e in sim.service_log}
+    run_id = save_run(db, sim)
+
+    with db.connect() as conn:
+        run = stats.get_run(conn, run_id)
+        assert run is not None
+        availability = {a.car: a for a in stats.car_availability(conn, run)}
+        (incident,) = stats.incidents(conn, run_id)
+
+    down_ms = log[ServiceKind.RETURN] - log[ServiceKind.OUT_OF_SERVICE]
+    assert availability[0].outages == 1
+    assert availability[0].down_s == round(down_ms / 1000, 1)
+    assert availability[0].availability_pct == round(100 * (1 - down_ms / sim.now_ms), 2)
+    assert availability[1].availability_pct == 100.0  # 멈춘 적 없는 카도 나온다
+    assert incident.fault == "STALL" and incident.first_rule == "STALLED"
+    fault_ms = log[ServiceKind.FAULT]
+    assert incident.detected_after_s == round((log[ServiceKind.ALERT] - fault_ms) / 1000, 1)
+    assert incident.repaired_after_s == round((log[ServiceKind.REPAIR] - fault_ms) / 1000, 1)
+    # 운행 중지 상태도 상태 변화 기록에 남는다 (CHECK 제약에 OUT_OF_SERVICE 추가)
+    with db.connect() as conn:
+        states = (
+            conn.execute(select(elevator_events.c.state).where(elevator_events.c.run_id == run_id))
+            .scalars()
+            .all()
+        )
+    assert "OUT_OF_SERVICE" in states
+
+
+def test_incidents_split_by_fault_and_keep_undetected(db):
+    run_id = insert_run(db, sim_ms=100_000)
+    rows = [
+        (0, 1000, 0, "FAULT", "DOOR_SENSOR"),
+        (1, 3000, 0, "ALERT", "DOOR_REOPEN_LOOP"),
+        (2, 3000, 0, "OUT_OF_SERVICE", "DOOR_REOPEN_LOOP"),
+        (3, 9000, 0, "REPAIR", ""),
+        (4, 10_000, 0, "RETURN", ""),
+        (5, 20_000, 0, "FAULT", "SLOW_MOTOR"),  # 두 번째 사건: 감지되지 않음
+    ]
+    with db.begin() as conn:
+        conn.execute(
+            service_log.insert(),
+            [
+                {"run_id": run_id, "seq": seq, "time_ms": t, "car": car, "kind": k, "detail": d}
+                for seq, t, car, k, d in rows
+            ],
+        )
+    with db.connect() as conn:
+        found = [
+            (i.fault, i.detected_after_s, i.repaired_after_s) for i in stats.incidents(conn, run_id)
+        ]
+        run = stats.get_run(conn, run_id)
+        assert run is not None
+        (car0,) = stats.car_availability(conn, run)
+    assert found == [("DOOR_SENSOR", 2.0, 8.0), ("SLOW_MOTOR", None, None)]
+    assert (car0.outages, car0.down_s, car0.availability_pct) == (1, 7.0, 93.0)
+
+
+def test_live_recorder_saves_service_log(db):
+    from app.simulation.types import Fault
+
+    sim = Simulation(Building(num_floors=10))
+    recorder = LiveRecorder(db)
+    run_id = recorder.start_run(sim)
+    sim.inject_fault(0, Fault.SLOW_MOTOR)
+    sim.repair(0)
+    recorder.collect(sim, sim.drain_service_log())
+    rows, service = recorder.take()
+    recorder.write(rows, sim.now_ms, service)
+    recorder.write(rows, sim.now_ms, service)  # 재시도해도 중복되지 않는다
+    assert count(db, service_log, run_id) == 2
