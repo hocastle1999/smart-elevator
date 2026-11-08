@@ -10,7 +10,7 @@
   - 기능 단위로 작게 나눠 진행하고 커밋도 그 단위로 나눈다.
 - 실제로 겪은 문제는 `docs/troubleshooting.md`에 문제, 원인, 해결, 배운 점으로 남긴다.
 - 설계 결정은 `docs/design.md`를 갱신한다. 상태나 전이를 바꾸면 Mermaid 다이어그램도 고친다.
-- 진행 단계는 README "로드맵"을 따른다. 현재 6단계(고장, 이상 감지, 점검 관리)까지 완료.
+- 진행 단계는 README "로드맵"을 따른다. 현재 7단계(배포)는 준비까지 완료: `render.yaml`, CI 기동 확인. 실제 배포는 사용자가 보류했다(전용 Render 워크스페이스를 만든 뒤 진행).
 - 사용자와의 대화와 문서는 한국어로 작성한다. 코드 식별자는 영어, 주석은 한국어로 쓴다.
 
 ## 기술 스택
@@ -67,6 +67,9 @@
   - API 테스트는 `run_loop=False`로 앱을 만들고 `runner.tick_once()`로 시간을 진행한다. 실제 루프가 필요한 테스트만 `with TestClient(app)`로 lifespan을 돌린다.
 - `scripts/fault_scenario.py`: 고장 시나리오 실험(감지 켬/끔 비교). 결과는 `docs/experiments.md`.
 - `scripts/compare_strategies.py`: 배차 전략 비교 실험. `python -m scripts.compare_strategies --output 파일`. 결과 해석은 `docs/experiments.md`. 전략이나 엔진 동작을 바꾸면 다시 돌려 문서의 숫자를 갱신한다.
+- `render.yaml`: Render 배포 설정. 워커와 인스턴스는 1개여야 한다(시뮬레이션이 메모리에 하나). 시작 명령을 바꾸면 CI의 Smoke test도 같이 바꾼다.
+  - 배포는 반드시 이 프로젝트 전용 Render 워크스페이스에 한다. 기존 워크스페이스에는 24시간 도는 다른 무료 서비스(스케줄 사이트)가 있어 무료 750시간을 함께 쓰면 둘 다 정지될 수 있다.
+  - 배포 후 429 응답의 기준 IP가 실제 공인 IP인지 확인해 `SIM_TRUSTED_PROXY_HOPS`를 맞춘다.
 - `docs/design.md`: 상태 머신 다이어그램과 설계 결정
 
 ## 규칙
@@ -80,6 +83,7 @@
 - 새 상태 전이를 추가하면 그 전이를 직접 일으키는 테스트를 함께 쓴다.
 - 오래 도는 서버에서 쌓이기만 하는 리스트를 만들지 않는다. 엔진의 `history`, `assignments`, `service_log`는 서버 tick마다 비운다 (docs/troubleshooting.md).
 - 인덱스를 추가하면 `EXPLAIN`으로 실제로 쓰이는지 확인한다. 윈도 함수의 정렬에는 인덱스가 쓰이지 않았다 (docs/troubleshooting.md).
+- 접속자 IP는 `rate_limit.client_ip`로만 구한다. `X-Forwarded-For`의 왼쪽 값을 믿지 않는다(위조). uvicorn은 `--no-proxy-headers`로 띄운다.
 - 비밀 정보는 `.env`에만 둔다. 코드, 문서, 커밋에 넣지 않는다. 새 DB 설정을 추가하면 `.env.example`, README 환경 변수 표, CI의 `env`도 갱신한다.
 - 의존성을 추가하면 버전을 고정해 `requirements.txt`(실행용) 또는 `requirements-dev.txt`(개발용)에 적는다.
 - 커밋 메시지는 `feat: ...`, `fix: ...`, `docs: ...`, `test: ...`, `chore: ...` 형식, 내용은 한국어.

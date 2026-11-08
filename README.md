@@ -21,7 +21,7 @@
 | 4 | 배차 알고리즘 2~3개(Nearest Car, 방향 일치·도착 예상시간 비용 기반, 목적층 예약 방식)와 교통 패턴(출근 상향 피크, 점심, 퇴근 하향 피크, 포아송 도착) 실험. 같은 시드로 평균·p95 대기시간과 이동 거리를 비교한 문서 | ✅ 완료 |
 | 5 | 운행 이벤트를 MySQL에 저장하고 통계 API 제공 (윈도우 함수 등 SQL 분석) | ✅ 완료 |
 | 6 | 고장 주입과 이상 감지 규칙, 점검 관리 | ✅ 완료 |
-| 7 | 배포 | 예정 |
+| 7 | 배포 | 🟡 준비 완료 (Render 설정, CI 기동 확인). 실제 배포는 보류 |
 
 공개 데모의 시뮬레이션은 **모든 방문자가 하나를 공유**합니다 (3단계에서 결정, 이유는 docs/design.md 5절).
 
@@ -159,12 +159,25 @@ py -3.11 -m venv .venv
 | `SIM_RATE_WINDOW_MS` | 10000 | 위 횟수를 세는 기간 |
 | `SIM_RECORD_FLUSH_MS` | 5000 | 운행 기록을 DB에 묶어서 저장하는 간격 |
 | `ADMIN_TOKEN` | (없음) | 관리 API 토큰. 비워 두면 관리 API는 403. 요청 헤더 `X-Admin-Token`으로 보낸다 |
+| `SIM_TRUSTED_PROXY_HOPS` | 0 | 앞에 있는 신뢰하는 프록시 수. 0이면 `X-Forwarded-For`를 무시 (Render는 1) |
 | `DB_ENABLED` | false | 운행 기록 저장과 통계 API 사용 (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`는 .env.example 참고) |
 
 GitHub Actions가 push와 PR마다 같은 검사(ruff check, ruff format --check, pytest)를 실행합니다.
 
+## 배포
+
+`render.yaml`(Render Blueprint)로 배포합니다. Render 대시보드에서 **New → Blueprint**로 이 저장소를 고르면 설정대로 만들어집니다. 설계 이유는 [docs/design.md](docs/design.md) 9절에 있습니다.
+
+- **무료 플랜, 싱가포르, 워커 1개**: 시뮬레이션이 메모리에 하나뿐이라 프로세스와 인스턴스를 1개로 둡니다. 무료 플랜은 15분 동안 요청이 없으면 잠들고, 깨어나면 시뮬레이션이 처음부터 시작합니다.
+- **DB 없이 시작**: 운행 기록과 통계 API가 필요하면 대시보드에서 `DB_ENABLED=true`와 `DB_*` 값을 넣습니다.
+- **관리 토큰**: Render가 `ADMIN_TOKEN`을 무작위로 만듭니다. 값은 대시보드의 Environment에서 봅니다.
+- **프록시 뒤의 빈도 제한**: `SIM_TRUSTED_PROXY_HOPS=1`. `X-Forwarded-For`에서 프록시가 덧붙인 오른쪽 값만 써서, 방문자가 헤더를 위조해 제한을 피할 수 없게 했습니다.
+- 무료 시간(월 750시간)은 워크스페이스 단위로 함께 쓰므로, 다른 무료 서비스와 다른 워크스페이스에 둡니다.
+
+배포 후 확인할 것: `/health`, 화면의 "연결됨", 브라우저 두 개에서 같은 건물이 보이는지, 429 응답의 기준 IP가 내 공인 IP인지, 관리 API가 토큰 없이 401인지 (design.md 9절).
+
 ## 문서
 
-- [docs/design.md](docs/design.md): 상태 머신 다이어그램, LOOK과 SCAN·FCFS 비교, 시간 처리와 결정성, 배차 전략과 Nearest Car, 실시간 서버(공유 방식, 동시성, 방송), 승객 모델과 사건 단위 시간 진행, 운행 기록 테이블과 윈도 함수 통계, 고장·감지·점검
+- [docs/design.md](docs/design.md): 상태 머신 다이어그램, LOOK과 SCAN·FCFS 비교, 시간 처리와 결정성, 배차 전략과 Nearest Car, 실시간 서버(공유 방식, 동시성, 방송), 승객 모델과 사건 단위 시간 진행, 운행 기록 테이블과 윈도 함수 통계, 고장·감지·점검, 배포 결정
 - [docs/experiments.md](docs/experiments.md): 배차 전략 비교 실험, 고장 시나리오 실험
 - [docs/troubleshooting.md](docs/troubleshooting.md): 개발 중 겪은 문제와 해결 기록
