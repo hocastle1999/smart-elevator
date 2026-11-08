@@ -22,6 +22,7 @@ class ElevatorView(BaseModel):
     hall_calls: list[HallCallView]
     in_service: bool
     maintenance_requested: bool
+    riding: int  # 타고 있는 승객 수 (자동 승객)
     # 주입된 고장 (데모용으로 보여 준다. 시스템은 감지 전까지 이 값을 모른다)
     fault: Fault | None
 
@@ -43,6 +44,8 @@ class StateSnapshot(BaseModel):
     viewers: int
     elevators: list[ElevatorView]
     service_log: list[ServiceEventView]  # 최근 서비스 기록 (오래된 것부터)
+    waiting: dict[int, int]  # 층별 기다리는 승객 수 (자동 승객)
+    recent_wait_s: float | None  # 최근 내린 승객 50명의 평균 대기 시간
 
 
 def _hall_views(calls: frozenset[HallCall]) -> list[HallCallView]:
@@ -51,7 +54,7 @@ def _hall_views(calls: frozenset[HallCall]) -> list[HallCallView]:
     return [HallCallView(floor=c.floor, direction=c.direction) for c in ordered]
 
 
-def _elevator_view(index: int, car: Elevator, maintenance: bool) -> ElevatorView:
+def _elevator_view(index: int, car: Elevator, maintenance: bool, riding: int) -> ElevatorView:
     return ElevatorView(
         id=index,
         floor=car.floor,
@@ -62,22 +65,30 @@ def _elevator_view(index: int, car: Elevator, maintenance: bool) -> ElevatorView
         hall_calls=_hall_views(car.hall_calls),
         in_service=car.in_service,
         maintenance_requested=maintenance,
+        riding=riding,
         fault=car.fault,
     )
 
 
 def snapshot_of(
-    simulation: Simulation, viewers: int, service: list[ServiceEvent] | None = None
+    simulation: Simulation,
+    viewers: int,
+    service: list[ServiceEvent] | None = None,
+    recent_wait_s: float | None = None,
 ) -> StateSnapshot:
     return StateSnapshot(
         time_ms=simulation.now_ms,
         num_floors=simulation.building.num_floors,
         viewers=viewers,
         elevators=[
-            _elevator_view(i, car, simulation.is_maintenance_requested(i))
+            _elevator_view(
+                i, car, simulation.is_maintenance_requested(i), simulation.riding_count(i)
+            )
             for i, car in enumerate(simulation.elevators)
         ],
         service_log=[ServiceEventView(**vars(e)) for e in service or []],
+        waiting=simulation.waiting_counts(),
+        recent_wait_s=recent_wait_s,
     )
 
 

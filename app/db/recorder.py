@@ -148,6 +148,7 @@ class LiveRecorder:
         self.last_error: str | None = None
         self._buffer: list[Row] = []
         self._service_buffer: list[Row] = []  # 서비스 기록은 적어서 상한 없이 모은다
+        self._trip_buffer: list[Row] = []  # 자동 승객 데모에서 다 내린 승객
         self._next_seq: list[int] = []
         self._next_service_seq = 0
 
@@ -158,13 +159,22 @@ class LiveRecorder:
         self._next_seq = [0] * len(sim.elevators)
         return self.run_id
 
-    def collect(self, sim: Simulation, service: Sequence[ServiceEvent] = ()) -> None:
+    def collect(
+        self,
+        sim: Simulation,
+        service: Sequence[ServiceEvent] = (),
+        finished: Sequence[Passenger] = (),
+    ) -> None:
         """새 상태 변화를 버퍼로 옮기고 카의 기록을 비운다. 이벤트 루프에서 부른다 (I/O 없음).
 
         service: 이번 tick에 생긴 서비스 기록 (고장, 감지, 운행 중지 등). 호출한 쪽이 꺼내서 넘긴다.
         """
         if self.run_id is None:
             return
+        self._trip_buffer += trip_rows(self.run_id, finished)
+        if len(self._trip_buffer) > self.max_buffer:
+            self.dropped += len(self._trip_buffer) - self.max_buffer
+            del self._trip_buffer[: len(self._trip_buffer) - self.max_buffer]
         self._service_buffer += service_rows(self.run_id, service, self._next_service_seq)
         self._next_service_seq += len(service)
         for car, elevator in enumerate(sim.elevators):
@@ -185,7 +195,15 @@ class LiveRecorder:
         service, self._service_buffer = self._service_buffer, []
         return rows, service
 
-    def give_back(self, rows: list[Row], service: list[Row] | None = None) -> None:
+    def take_trips(self) -> list[Row]:
+        """다 내린 승객 기록을 꺼낸다 (자동 승객 데모)."""
+        trips, self._trip_buffer = self._trip_buffer, []
+        return trips
+
+    def give_back(
+        self, rows: list[Row], service: list[Row] | None = None, trips: list[Row] | None = None
+    ) -> None:
+        self._trip_buffer = (trips or []) + self._trip_buffer
         """저장에 실패한 기록을 버퍼 앞에 되돌린다 (다음 저장 때 다시 시도)."""
         self._service_buffer = (service or []) + self._service_buffer
         self._buffer = rows + self._buffer
@@ -194,7 +212,13 @@ class LiveRecorder:
             del self._buffer[:overflow]
             self.dropped += overflow
 
-    def write(self, rows: list[Row], sim_ms: int, service: list[Row] | None = None) -> None:
+    def write(
+        self,
+        rows: list[Row],
+        sim_ms: int,
+        service: list[Row] | None = None,
+        trips: list[Row] | None = None,
+    ) -> None:
         """기록을 저장하고 실행의 마지막 시각을 갱신한다. DB I/O라서 스레드에서 부른다."""
         # 재시도해도 안전하게(멱등): 커밋은 됐는데 응답 직전에 연결이 끊기면 실패로 보고 같은 행을
         # 다시 보낸다. 기본키 (run_id, car, seq)가 자연키라 이미 있는 행이면 아무것도 바꾸지 않는다.
@@ -208,6 +232,9 @@ class LiveRecorder:
                 conn.execute(stmt, rows[start : start + CHUNK_ROWS])
             if service:
                 conn.execute(service_stmt, service)
+            if trips:
+                trip_stmt = mysql_insert(passenger_trips)
+                conn.execute(trip_stmt.on_duplicate_key_update(car=trip_stmt.inserted.car), trips)
             conn.execute(
                 update(simulation_runs)
                 .where(simulation_runs.c.id == self.run_id)

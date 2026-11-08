@@ -16,7 +16,7 @@ from app.db.recorder import LiveRecorder, save_run
 from app.db.tables import elevator_events, passenger_trips, service_log, simulation_runs
 from app.main import create_app
 from app.server.settings import ServerSettings
-from app.simulation import STRATEGIES, Building, Direction, Simulation
+from app.simulation import STRATEGIES, Building, Direction, PassengerArrival, Simulation
 from app.simulation.passengers import percentile
 from app.simulation.traffic import PATTERNS, poisson_passengers
 
@@ -424,3 +424,20 @@ def test_live_recorder_saves_service_log(db):
     recorder.write(rows, sim.now_ms, service)
     recorder.write(rows, sim.now_ms, service)  # 재시도해도 중복되지 않는다
     assert count(db, service_log, run_id) == 2
+
+
+def test_live_recorder_saves_finished_passengers(db):
+    sim = Simulation(Building(num_floors=10))
+    recorder = LiveRecorder(db)
+    run_id = recorder.start_run(sim)
+    sim.schedule_all([PassengerArrival(0, 1, 5), PassengerArrival(0, 3, 1)])
+    sim.run_until_idle(dt_ms=1000)
+    recorder.collect(sim, finished=sim.drain_finished_passengers())
+    rows, service = recorder.take()
+    trips = recorder.take_trips()
+    recorder.write(rows, sim.now_ms, service, trips)
+    recorder.write(rows, sim.now_ms, service, trips)  # 재시도해도 중복 없음
+    assert count(db, passenger_trips, run_id) == 2
+    with db.connect() as conn:
+        assert stats.wait_summary(conn, run_id).served == 2
+    assert sim.passengers == []

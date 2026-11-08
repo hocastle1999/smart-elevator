@@ -132,3 +132,31 @@ def test_summarize_ignores_unfinished_passengers():
     assert stats.served == 1
     assert stats.mean_wait_s == 3.0  # (2 + 4) / 2
     assert stats.mean_journey_s == 10.0
+
+
+def test_passenger_stream_is_endless_and_deterministic(building):
+    from app.simulation.traffic import LUNCH, PassengerStream
+
+    def first(n: int, seed: int) -> list:
+        stream = PassengerStream(building, [UP_PEAK, LUNCH, DOWN_PEAK], 30, seed)
+        return [stream.next_arrival() for _ in range(n)]
+
+    a = first(500, seed=1)
+    assert a == first(500, seed=1)
+    assert a != first(500, seed=2)
+    times = [x.time_ms for x in a]
+    assert times == sorted(times)
+    assert all(x.origin != x.destination for x in a)
+
+
+def test_passenger_stream_cycles_patterns(building):
+    from app.simulation.traffic import LUNCH, PassengerStream
+
+    stream = PassengerStream(building, [UP_PEAK, LUNCH, DOWN_PEAK], 10, seed=0, cycle_ms=1000)
+    assert [stream.pattern_at(t) for t in (0, 999, 1000, 2500, 3000)] == [
+        UP_PEAK,
+        UP_PEAK,
+        LUNCH,
+        DOWN_PEAK,
+        UP_PEAK,
+    ]

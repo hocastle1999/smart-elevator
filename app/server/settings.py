@@ -3,7 +3,7 @@
 import os
 from dataclasses import dataclass, fields
 
-ZERO_ALLOWED = {"trusted_proxy_hops"}
+ZERO_ALLOWED = {"trusted_proxy_hops", "auto_per_minute", "auto_seed"}
 
 
 @dataclass(frozen=True)
@@ -23,13 +23,18 @@ class ServerSettings:
     # 앞에 있는 신뢰하는 프록시 수 (Render 같은 플랫폼). 0이면 X-Forwarded-For를 무시하고
     # 접속한 상대의 IP를 그대로 쓴다. 자세한 이유는 rate_limit.client_ip.
     trusted_proxy_hops: int = 0
+    # 자동 승객 (데모): 분당 몇 명이 도착하는가. 0이면 끈다 (사람이 누른 호출만).
+    auto_per_minute: int = 6
+    # 교통 패턴: up-peak, lunch, down-peak 중 하나, 또는 cycle(10분마다 돌아가며)
+    auto_pattern: str = "cycle"
+    auto_seed: int = 0
     # False면 시작할 때 루프를 돌리지 않는다 (테스트에서 tick을 직접 부를 때)
     run_loop: bool = True
 
     def __post_init__(self) -> None:
         for f in fields(self):
             value = getattr(self, f.name)
-            if isinstance(value, bool):
+            if isinstance(value, bool | str):
                 continue
             if value < 0 or (value == 0 and f.name not in ZERO_ALLOWED):
                 raise ValueError(f"{f.name}은 양수여야 합니다: {value}")
@@ -37,10 +42,13 @@ class ServerSettings:
     @classmethod
     def from_env(cls) -> "ServerSettings":
         """SIM_NUM_FLOORS, SIM_TICK_MS처럼 SIM_ + 대문자 필드 이름의 환경 변수를 읽는다."""
-        values: dict[str, int | bool] = {}
+        values: dict[str, int | bool | str] = {}
         for f in fields(cls):
             raw = os.environ.get(f"SIM_{f.name.upper()}")
             if raw is None:
                 continue
-            values[f.name] = raw.lower() in ("1", "true", "yes") if f.type is bool else int(raw)
+            if f.type is bool:
+                values[f.name] = raw.lower() in ("1", "true", "yes")
+            else:
+                values[f.name] = raw if f.type is str else int(raw)
         return cls(**values)  # type: ignore[arg-type]

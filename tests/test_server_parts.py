@@ -184,3 +184,15 @@ def test_settings_allow_zero_proxy_hops_but_not_negative():
     assert ServerSettings(trusted_proxy_hops=0).trusted_proxy_hops == 0
     with pytest.raises(ValueError):
         ServerSettings(trusted_proxy_hops=-1)
+
+
+def test_auto_pattern_setting_from_env(monkeypatch):
+    monkeypatch.setenv("SIM_AUTO_PATTERN", "lunch")
+    monkeypatch.setenv("SIM_AUTO_PER_MINUTE", "0")
+    settings = ServerSettings.from_env()
+    assert (settings.auto_pattern, settings.auto_per_minute) == ("lunch", 0)
+
+
+def test_unknown_auto_pattern_is_rejected():
+    with pytest.raises(ValueError):
+        SimulationRunner(ServerSettings(auto_pattern="rush"), Broadcaster(max_connections=1))

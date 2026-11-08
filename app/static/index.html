@@ -80,6 +80,7 @@
   <span class="stat" id="conn">연결: <b>접속 중…</b></span>
   <span class="stat">시뮬레이션 시각: <b id="time">-</b></span>
   <span class="stat">함께 보는 사람: <b id="viewers">-</b></span>
+  <span class="stat">최근 평균 대기: <b id="recent-wait">-</b></span>
 </header>
 <main>
   <section class="card"><div id="building"></div></section>
@@ -230,6 +231,8 @@ function render(s) {
   if (built !== `${s.num_floors}x${s.elevators.length}`) build(s.num_floors, s.elevators.length);
   document.getElementById("time").textContent = formatTime(s.time_ms);
   document.getElementById("viewers").textContent = s.viewers;
+  document.getElementById("recent-wait").textContent =
+    s.recent_wait_s === null ? "-" : `${s.recent_wait_s}초`;
 
   const lit = new Map();  // "층-방향" -> 맡은 카 번호
   s.elevators.forEach((e, i) => {
@@ -238,7 +241,8 @@ function render(s) {
     const open = e.state === "DOORS_OPEN" || e.state === "DOORS_OPENING";
     ui.cars[i].classList.toggle("doors-closed", !open);
     ui.cars[i].classList.toggle("oos", !e.in_service);
-    ui.cars[i].firstChild.textContent = e.in_service ? `${i + 1}${ARROW[e.direction]}` : `${i + 1}✕`;
+    const load = e.riding ? ` ${e.riding}` : "";
+    ui.cars[i].firstChild.textContent = e.in_service ? `${i + 1}${ARROW[e.direction]}${load}` : `${i + 1}✕`;
     let status = `${e.in_service ? STATE_KO[e.state] : "운행 중지"} · ${e.floor}층`;
     if (e.maintenance_requested) status += " · 점검 대기";
     if (e.fault) status += ` · ⚠ ${FAULT_KO[e.fault]}`;
@@ -259,7 +263,8 @@ function render(s) {
   }
   for (const [f, a] of Object.entries(ui.assigned)) {
     const cars = ["UP", "DOWN"].filter((d) => lit.has(`${f}-${d}`)).map((d) => lit.get(`${f}-${d}`) + 1);
-    a.textContent = cars.length ? `→ ${[...new Set(cars)].join(",")}호기` : "";
+    const people = s.waiting[f] ? `👤${s.waiting[f]} ` : "";
+    a.textContent = people + (cars.length ? `→ ${[...new Set(cars)].join(",")}호기` : "");
   }
 }
 

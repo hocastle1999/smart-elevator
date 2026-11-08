@@ -10,7 +10,8 @@ from app.server.settings import ServerSettings
 
 def make_client(**overrides) -> TestClient:
     # 기본은 루프를 돌리지 않는다. 시간은 runner.tick_once()로 직접 진행한다.
-    settings = ServerSettings(**{"run_loop": False, **overrides})
+    # 자동 승객은 끈다 (테스트가 정한 호출만 들어가게). 자동 승객 테스트는 따로 켠다.
+    settings = ServerSettings(**{"run_loop": False, "auto_per_minute": 0, **overrides})
     return TestClient(create_app(settings))
 
 
@@ -41,6 +42,7 @@ def test_state_describes_building_and_cars(client):
         "hall_calls": [],
         "in_service": True,
         "maintenance_requested": False,
+        "riding": 0,
         "fault": None,
     }
     assert body["service_log"] == []
@@ -257,3 +259,29 @@ def test_rate_limit_uses_forwarded_ip_behind_proxy():
     # 다른 사람(다른 실제 IP)은 따로 센다
     other = post("8.8.8.8")
     assert other.status_code == 202
+
+
+# ---------------------------------------------------------------- 자동 승객 (데모)
+
+
+def test_auto_passengers_ride_and_are_not_kept_in_memory():
+    client = make_client(auto_per_minute=12, sim_ms_per_tick=1000)
+    runner = runner_of(client)
+    for _ in range(900):  # 시뮬레이션 15분, 약 180명
+        runner.tick_once()
+    state = client.get("/api/state").json()
+    assert state["recent_wait_s"] is not None  # 내린 승객이 있다
+    assert len(runner.recent_waits) == 50
+    # 다 내린 승객은 메모리에서 뺀다: 남은 것은 기다리거나 타고 있는 승객뿐
+    assert all(p.alight_ms is None for p in runner.simulation.passengers)
+    assert len(runner.simulation.passengers) < 60
+    waiting = sum(state["waiting"].values()) + sum(e["riding"] for e in state["elevators"])
+    assert waiting == len(runner.simulation.passengers)
+
+
+def test_auto_passengers_can_be_turned_off(client):
+    runner = runner_of(client)
+    for _ in range(100):
+        runner.tick_once()
+    assert runner.stream is None
+    assert client.get("/api/state").json()["waiting"] == {}

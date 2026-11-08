@@ -92,6 +92,7 @@ class Simulation:
 
         # 승객 (4단계). 승객을 쓰지 않는 시뮬레이션(실시간 서버의 버튼 호출)에서는 비어 있다.
         self.passengers: list[Passenger] = []
+        self._next_passenger_id = 0  # 다 내린 승객을 꺼내도 번호가 겹치지 않게
         self._waiting: dict[int, list[Passenger]] = defaultdict(list)  # 층 -> 기다리는 승객
         self._riding: list[list[Passenger]] = [[] for _ in self.elevators]
         self._prev_state = [car.state for car in self.elevators]
@@ -180,7 +181,8 @@ class Simulation:
         self.building.validate_floor(arrival.destination)
         if arrival.origin == arrival.destination:
             raise ValueError("출발층과 목적층이 같습니다.")
-        p = Passenger(len(self.passengers), self.now_ms, arrival.origin, arrival.destination)
+        p = Passenger(self._next_passenger_id, self.now_ms, arrival.origin, arrival.destination)
+        self._next_passenger_id += 1
         self.passengers.append(p)
         self._waiting[p.origin].append(p)
         self._request_service(p)
@@ -302,6 +304,19 @@ class Simulation:
         message: str = "",
     ) -> None:
         self.service_log.append(ServiceEvent(self.now_ms, car, kind, detail, severity, message))
+
+    def drain_finished_passengers(self) -> list[Passenger]:
+        """목적층에서 내린 승객을 꺼내고 목록에서 뺀다 (오래 도는 서버에서 메모리가 늘지 않게)."""
+        finished = [p for p in self.passengers if p.alight_ms is not None]
+        self.passengers = [p for p in self.passengers if p.alight_ms is None]
+        return finished
+
+    def waiting_counts(self) -> dict[int, int]:
+        """층별로 기다리는 승객 수."""
+        return {floor: len(q) for floor, q in self._waiting.items() if q}
+
+    def riding_count(self, car: int) -> int:
+        return len(self._riding[car])
 
     def drain_service_log(self) -> list[ServiceEvent]:
         """서비스 기록을 꺼내고 비운다 (오래 도는 서버에서 메모리에 쌓이지 않게)."""

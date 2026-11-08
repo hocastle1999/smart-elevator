@@ -96,3 +96,48 @@ def poisson_passengers(
             origin, destination = rng.sample(upper, 2)
         arrivals.append(PassengerArrival(int(t), origin, destination))
     return arrivals
+
+
+class PassengerStream:
+    """끝없이 이어지는 포아송 도착 승객 (실시간 데모용).
+
+    `poisson_passengers`는 기간을 정해 목록을 한 번에 만든다. 실시간 서버는 끝이 없으므로
+    필요한 만큼씩 다음 승객을 꺼낸다. 패턴을 하나 주거나, 여러 패턴을 cycle_ms마다 돌아가며 쓴다.
+    """
+
+    def __init__(
+        self,
+        building: Building,
+        patterns: list[TrafficPattern],
+        per_minute: float,
+        seed: int,
+        cycle_ms: int = 10 * 60_000,
+    ) -> None:
+        if building.num_floors < 3:
+            raise ValueError("층간 이동을 만들려면 3개 층 이상이어야 합니다.")
+        if per_minute <= 0 or not patterns:
+            raise ValueError("per_minute는 양수, patterns는 하나 이상이어야 합니다.")
+        self.building = building
+        self.patterns = patterns
+        self.cycle_ms = cycle_ms
+        self._rng = random.Random(seed)
+        self._rate_per_ms = per_minute / 60_000
+        self._t = 0.0
+
+    def pattern_at(self, time_ms: int) -> TrafficPattern:
+        return self.patterns[(time_ms // self.cycle_ms) % len(self.patterns)]
+
+    def next_arrival(self) -> PassengerArrival:
+        self._t += self._rng.expovariate(self._rate_per_ms)
+        time_ms = int(self._t)
+        pattern = self.pattern_at(time_ms)
+        lobby = self.building.bottom
+        upper = range(lobby + 1, self.building.top + 1)
+        r = self._rng.random()
+        if r < pattern.lobby_to_upper:
+            origin, destination = lobby, self._rng.choice(upper)
+        elif r < pattern.lobby_to_upper + pattern.upper_to_lobby:
+            origin, destination = self._rng.choice(upper), lobby
+        else:
+            origin, destination = self._rng.sample(upper, 2)
+        return PassengerArrival(time_ms, origin, destination)

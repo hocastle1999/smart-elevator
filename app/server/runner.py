@@ -20,6 +20,8 @@ from app.server.schemas import StateSnapshot, snapshot_of
 from app.server.settings import ServerSettings
 from app.simulation import Building, Simulation
 from app.simulation.monitor import Monitor, ServiceEvent
+from app.simulation.passengers import PassengerArrival
+from app.simulation.traffic import PATTERNS, PassengerStream
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,12 @@ class SimulationRunner:
         self.monitor = Monitor(self.simulation)
         # 화면에 보여 줄 최근 서비스 기록 (고장, 감지, 운행 중지 등)
         self.recent_service: deque[ServiceEvent] = deque(maxlen=20)
+        # 자동 승객 (데모): 아무도 누르지 않아도 엘리베이터가 움직이게 한다.
+        self.stream = self._make_stream(settings)
+        self._next_arrival: PassengerArrival | None = (
+            self.stream.next_arrival() if self.stream else None
+        )
+        self.recent_waits: deque[int] = deque(maxlen=50)  # 최근 내린 승객들의 대기 시간
         self.lagged_ticks = 0  # 제시간에 돌지 못한 tick 수 (서버 과부하 지표)
         self._task: asyncio.Task[None] | None = None
         self._flush_task: asyncio.Task[None] | None = None
@@ -51,19 +59,47 @@ class SimulationRunner:
         return self._task is not None and not self._task.done()
 
     def snapshot(self) -> StateSnapshot:
+        waits = self.recent_waits
+        recent_wait_s = round(sum(waits) / len(waits) / 1000, 1) if waits else None
         return snapshot_of(
-            self.simulation, viewers=self.broadcaster.count, service=list(self.recent_service)
+            self.simulation,
+            viewers=self.broadcaster.count,
+            service=list(self.recent_service),
+            recent_wait_s=recent_wait_s,
         )
+
+    @staticmethod
+    def _make_stream(settings: ServerSettings) -> PassengerStream | None:
+        if settings.auto_per_minute <= 0:
+            return None
+        if settings.auto_pattern == "cycle":
+            patterns = [PATTERNS["up-peak"], PATTERNS["lunch"], PATTERNS["down-peak"]]
+        elif settings.auto_pattern in PATTERNS:
+            patterns = [PATTERNS[settings.auto_pattern]]
+        else:
+            raise ValueError(f"알 수 없는 교통 패턴: {settings.auto_pattern}")
+        building = Building(num_floors=settings.num_floors)
+        return PassengerStream(building, patterns, settings.auto_per_minute, settings.auto_seed)
+
+    def _feed_passengers(self, until_ms: int) -> None:
+        """이번 tick 안에 도착할 승객을 미리 예약한다 (정확한 시각에 들어가도록)."""
+        while self._next_arrival is not None and self._next_arrival.time_ms <= until_ms:
+            self.simulation.schedule(self._next_arrival)
+            assert self.stream is not None
+            self._next_arrival = self.stream.next_arrival()
 
     def tick_once(self) -> None:
         """시뮬레이션을 한 tick 진행하고 모든 접속자에게 새 상태를 보낸다."""
+        self._feed_passengers(self.simulation.now_ms + self.settings.sim_ms_per_tick)
         self.simulation.step(self.settings.sim_ms_per_tick)
+        finished = self.simulation.drain_finished_passengers()
+        self.recent_waits.extend(p.wait_ms for p in finished if p.wait_ms is not None)
         # 오래 도는 서버라 기록을 쌓아 두지 않는다: 상태 변화는 저장 버퍼로 옮기거나(DB가 있으면)
         # 버리고, 배차 기록도 비운다. 그대로 두면 메모리가 끝없이 늘어난다.
         service = self.simulation.drain_service_log()
         self.recent_service.extend(service)
         if self.recorder is not None and self.recorder.run_id is not None:
-            self.recorder.collect(self.simulation, service)
+            self.recorder.collect(self.simulation, service, finished)
         else:
             for car in self.simulation.elevators:
                 car.drain_history()
@@ -125,15 +161,16 @@ class SimulationRunner:
         if recorder is None or recorder.run_id is None:
             return
         rows, service = recorder.take()  # 루프 스레드에서 꺼낸다. 이후 기록은 새 버퍼로 간다.
-        if not rows and not service:
+        trips = recorder.take_trips()
+        if not rows and not service and not trips:
             return
         try:
-            await asyncio.to_thread(recorder.write, rows, self.simulation.now_ms, service)
+            await asyncio.to_thread(recorder.write, rows, self.simulation.now_ms, service, trips)
             recorder.last_error = None
         except Exception as e:
             # DB가 잠시 죽어도 시뮬레이션은 계속 돈다. 기록은 버퍼로 되돌려 다음에 다시 시도한다.
             logger.warning("운행 기록 저장 실패, 다음에 다시 시도합니다: %r", e)
-            recorder.give_back(rows, service)
+            recorder.give_back(rows, service, trips)
             recorder.last_error = repr(e)
 
     # ------------------------------------------------------------------ 시작과 정지
