@@ -18,7 +18,7 @@
 | 1 | 단일 엘리베이터 상태 머신 엔진 (LOOK 방식, 결정적 시뮬레이션) | ✅ 완료 |
 | 2 | 여러 대 + 배차 전략 인터페이스(Strategy 패턴) + 가장 가까운 차(Nearest Car) | ✅ 완료 |
 | 3 | 실시간 서버: asyncio 시뮬레이션 루프, REST로 호출, WebSocket 상태 방송, 간단한 화면 한 페이지 | ✅ 완료 |
-| 4 | 배차 알고리즘 2~3개(Nearest Car, 방향 일치·도착 예상시간 비용 기반, 목적층 예약 방식)와 교통 패턴(출근 상향 피크, 점심, 퇴근 하향 피크, 포아송 도착) 실험. 같은 시드로 평균·p95 대기시간과 이동 거리를 비교한 문서 | 예정 |
+| 4 | 배차 알고리즘 2~3개(Nearest Car, 방향 일치·도착 예상시간 비용 기반, 목적층 예약 방식)와 교통 패턴(출근 상향 피크, 점심, 퇴근 하향 피크, 포아송 도착) 실험. 같은 시드로 평균·p95 대기시간과 이동 거리를 비교한 문서 | ✅ 완료 |
 | 5 | 운행 이벤트를 MySQL에 저장하고 통계 API 제공 (윈도우 함수 등 SQL 분석) | 예정 |
 | 6 | 고장 주입과 이상 감지 규칙, 점검 관리 | 예정 |
 | 7 | 배포 | 예정 |
@@ -69,6 +69,23 @@ print([(a.time_ms, a.call.floor, a.car) for a in sim.assignments])
 - **느린 접속자 격리**: 접속자마다 최신 상태 1개만 담는 큐를 둬서, 한 명이 느려도 루프와 다른 접속자는 기다리지 않습니다.
 - **공유 데모 보호**: 접속자(IP)별 호출 빈도 제한(429 + `Retry-After`), 동시 접속 상한(넘으면 1013으로 닫음).
 
+## 4단계: 승객과 배차 전략 비교
+
+- **승객 모델**: 승객이 도착해 버튼을 누르고, 같은 방향 카에 정원까지 타고, 목적층에서 내립니다. 대기 시간과 이동 시간을 잽니다.
+- **사건 단위 시간 진행**: 한 카의 탑승이 다른 카의 호출을 취소하는 등 카끼리 영향을 주므로, 모든 카를 "가장 이른 전이 시각"까지 함께 옮긴 뒤 전이를 처리합니다. tick 크기와 무관한 결과를 유지합니다.
+- **배차 전략 3개**: Nearest Car, ETA 비용(맡은 정지까지 따진 도착 예상시간), 목적층 예약(같은 목적층 승객을 한 카에 모음).
+- **교통 패턴**: 출근(로비→위층), 점심, 퇴근(위층→로비). 포아송 과정으로 도착.
+
+[실험 결과](docs/experiments.md) (15층, 4대, 시드 5개):
+
+| 상황 | 평균 대기: Nearest Car / ETA / 목적층 예약 |
+|---|---|
+| 출근, 분당 30명 | 346.1초 / 165.7초 / **40.8초** |
+| 점심, 분당 30명 | 28.7초 / **27.2초** / 45.4초 |
+| 퇴근, 분당 20명 | 25.0초 / **19.6초** / 21.4초 |
+
+모든 상황에서 이기는 전략은 없습니다. 목적층 예약은 출근 혼잡에서 처리 용량을 크게 늘리지만, 점심과 퇴근에는 배정된 카만 탈 수 있다는 제약 때문에 오히려 불리합니다.
+
 ## 실행 방법
 
 Windows PowerShell, 프로젝트 루트 기준입니다. Python 3.11이 필요합니다.
@@ -83,6 +100,9 @@ py -3.11 -m venv .venv
 # 린트, 포맷 검사
 .\.venv\Scripts\ruff.exe check .
 .\.venv\Scripts\ruff.exe format --check .
+
+# 배차 전략 비교 실험 (결과를 UTF-8 Markdown으로 저장)
+.\.venv\Scripts\python.exe -m scripts.compare_strategies --output results.md
 
 # 서버 실행 후 브라우저에서 http://localhost:8000 (API 문서: /docs)
 .\.venv\Scripts\python.exe -m uvicorn app.main:app
@@ -104,5 +124,6 @@ GitHub Actions가 push와 PR마다 같은 검사(ruff check, ruff format --check
 
 ## 문서
 
-- [docs/design.md](docs/design.md): 상태 머신 다이어그램, LOOK과 SCAN·FCFS 비교, 시간 처리와 결정성, 배차 전략과 Nearest Car, 실시간 서버(공유 방식, 동시성, 방송)
+- [docs/design.md](docs/design.md): 상태 머신 다이어그램, LOOK과 SCAN·FCFS 비교, 시간 처리와 결정성, 배차 전략과 Nearest Car, 실시간 서버(공유 방식, 동시성, 방송), 승객 모델과 사건 단위 시간 진행
+- [docs/experiments.md](docs/experiments.md): 배차 전략 비교 실험 결과와 분석
 - [docs/troubleshooting.md](docs/troubleshooting.md): 개발 중 겪은 문제와 해결 기록
