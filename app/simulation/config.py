@@ -14,6 +14,7 @@ class ElevatorConfig:
     floor_travel_ms: int = 2000  # 한 층 이동하는 데 걸리는 시간
     door_transition_ms: int = 1000  # 문이 열리는(닫히는) 데 걸리는 시간
     door_dwell_ms: int = 3000  # 문이 완전히 열린 채 머무는 시간
+    capacity: int = 12  # 정원(명). 승객을 다루는 시뮬레이션에서만 쓴다.
 
     def __post_init__(self) -> None:
         for f in fields(self):

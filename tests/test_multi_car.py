@@ -31,14 +31,14 @@ class AlwaysLastCar(DispatchStrategy):
 
     name = "always-last"
 
-    def select(self, call: HallCall, elevators: Sequence[Elevator]) -> int:
+    def select(self, request, elevators: Sequence[Elevator], context=None) -> int:
         return len(elevators) - 1
 
 
 class BrokenStrategy(DispatchStrategy):
     name = "broken"
 
-    def select(self, call: HallCall, elevators: Sequence[Elevator]) -> int:
+    def select(self, request, elevators: Sequence[Elevator], context=None) -> int:
         return len(elevators)  # 없는 카
 
 

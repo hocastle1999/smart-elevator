@@ -9,6 +9,7 @@
 항상 같은 결과가 나온다(결정적). 설계 이유는 docs/design.md 참고.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.simulation.building import Building
@@ -59,7 +60,10 @@ class Elevator:
         self._car_calls: set[int] = set()
         self._hall_calls: set[HallCall] = set()
 
+        self.floors_traveled = 0  # 이동한 층 수 (운행 거리)
         self.history: list[StateChange] = []
+        # 상태가 바뀔 때마다 불리는 함수. Simulation이 승객 처리에 쓴다.
+        self.on_state_change: Callable[[Elevator, StateChange], None] | None = None
         self._record()
 
     # ------------------------------------------------------------------ 조회
@@ -76,6 +80,16 @@ class Elevator:
     def is_idle(self) -> bool:
         """대기 중이고 처리할 호출이 하나도 없는가."""
         return self.state is ElevatorState.IDLE and not self._car_calls and not self._hall_calls
+
+    @property
+    def remaining_ms(self) -> int:
+        """지금 하고 있는 일(이동, 문 동작)이 끝날 때까지 남은 시간. 대기 중이면 0."""
+        return self._remaining_ms
+
+    @property
+    def time_to_next_event(self) -> int | None:
+        """다음 상태 전이까지 남은 시간. 대기 중이면 스스로 바뀌지 않으므로 None."""
+        return None if self.state is ElevatorState.IDLE else self._remaining_ms
 
     @property
     def position(self) -> float:
@@ -107,6 +121,14 @@ class Elevator:
         self._hall_calls.add(HallCall(floor, direction))
         self._on_new_call()
 
+    def cancel_hall_call(self, call: HallCall) -> None:
+        """맡았던 홀 호출을 취소한다 (다른 카가 먼저 그 손님을 태운 경우).
+
+        상태는 바로 바꾸지 않는다. 이동 중이면 다음 층에 도착할 때 다시 판단해서,
+        더 갈 이유가 없으면 그 층에서 멈춘다.
+        """
+        self._hall_calls.discard(call)
+
     def register(self, call: Call) -> None:
         match call:
             case CarCall(floor=floor):
@@ -137,24 +159,42 @@ class Elevator:
         if dt_ms < 0:
             raise ValueError("dt_ms는 0 이상이어야 합니다.")
         remaining = dt_ms
-        while self.state is not ElevatorState.IDLE:
-            if self._remaining_ms == 0:
-                self._complete_phase()
-                continue
-            if remaining == 0:
-                break
-            step = min(remaining, self._remaining_ms)
-            self._remaining_ms -= step
+        self.complete_due_phases()
+        while remaining > 0:
+            # 대기 중이면 남은 시간은 그냥 흘러간다.
+            step = (
+                remaining
+                if self.state is ElevatorState.IDLE
+                else min(remaining, self._remaining_ms)
+            )
+            self.elapse(step)
             remaining -= step
-            self.now_ms += step
-        # 대기 중이면 남은 시간은 그냥 흘러간다.
-        self.now_ms += remaining
+            self.complete_due_phases()
+
+    def elapse(self, dt_ms: int) -> None:
+        """시계만 dt_ms 진행한다. 상태 전이는 하지 않는다.
+
+        여러 대를 함께 돌릴 때 Simulation이 "모든 카의 시계를 같은 시각으로 맞춘 뒤 전이 처리"를
+        하려고 tick을 두 단계(elapse → complete_due_phases)로 나눠 쓴다. 한 카의 전이(예: 승객이
+        탐)가 다른 카에 영향을 줄 때, 다른 카도 이미 같은 시각에 있어야 하기 때문이다.
+        """
+        if self.state is not ElevatorState.IDLE:
+            if dt_ms > self._remaining_ms:
+                raise ValueError("다음 전이 시각을 넘어 시계를 진행할 수 없습니다.")
+            self._remaining_ms -= dt_ms
+        self.now_ms += dt_ms
+
+    def complete_due_phases(self) -> None:
+        """남은 시간이 0이 된 동작을 끝내고 다음 상태로 넘어간다 (연달아 끝나는 것까지)."""
+        while self.state is not ElevatorState.IDLE and self._remaining_ms == 0:
+            self._complete_phase()
 
     def _complete_phase(self) -> None:
         """시간이 걸리는 동작 하나가 끝났을 때의 상태 전이."""
         match self.state:
             case ElevatorState.MOVING_UP | ElevatorState.MOVING_DOWN:
                 self.floor += self.direction.step
+                self.floors_traveled += 1
                 self._on_arrive()
             case ElevatorState.DOORS_OPENING:
                 self._set_state(ElevatorState.DOORS_OPEN, self.config.door_dwell_ms)
@@ -184,7 +224,7 @@ class Elevator:
         if self._has_any_call_here():
             self._open_doors()
         else:
-            # 호출을 취소하는 기능이 없어 실제로는 오지 않는 경우지만, 안전하게 다시 판단한다.
+            # 가던 이유(홀 호출)가 취소된 경우: 이 층에서 멈추고 다시 판단한다.
             self._decide()
 
     def _decide(self) -> None:
@@ -296,7 +336,11 @@ class Elevator:
             self._record()
 
     def _record(self) -> None:
-        self.history.append(StateChange(self.now_ms, self.state, self.floor, self.direction))
+        change = StateChange(self.now_ms, self.state, self.floor, self.direction)
+        self.history.append(change)
+        if self.on_state_change is not None:
+            # 승객 처리(타고 내리기)는 상태가 바뀌는 바로 그 시각에 해야 tick 크기와 무관하다.
+            self.on_state_change(self, change)
 
     # ------------------------------------------------------------------ 호출 검사
 
