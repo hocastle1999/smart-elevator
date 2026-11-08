@@ -9,6 +9,31 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    # 운행 기록과 SQL 통계 테스트는 실제 MySQL 8.0에서 돈다 (윈도 함수, 생성 열, CHECK 제약).
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: smart_elevator_test
+          MYSQL_USER: smart_elevator_app
+          MYSQL_PASSWORD: ci-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    # CI 전용 값. 실제 비밀 값과는 무관하다.
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_USER: smart_elevator_app
+      DB_PASSWORD: ci-password
+      TEST_DB_NAME: smart_elevator_test
+
     steps:
       - uses: actions/checkout@v7
 

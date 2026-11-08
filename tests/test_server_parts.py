@@ -9,6 +9,7 @@ from app.server.broadcast import Broadcaster, Client
 from app.server.rate_limit import RateLimiter
 from app.server.runner import SimulationRunner
 from app.server.settings import ServerSettings
+from app.simulation import Direction
 
 
 class FakeClock:
@@ -148,3 +149,13 @@ def test_runner_stops_cleanly_and_reports_not_running():
     asyncio.run(scenario())
     assert not runner.is_running
     assert runner.simulation.now_ms > 0
+
+
+def test_runner_does_not_keep_history_in_memory():
+    """오래 도는 서버: DB가 없어도 상태 변화와 배차 기록을 tick마다 비워 메모리가 늘지 않는다."""
+    runner = SimulationRunner(ServerSettings(), Broadcaster(max_connections=1))
+    runner.simulation.press_hall_button(5, Direction.UP)
+    for _ in range(100):
+        runner.tick_once()
+    assert all(not car.history for car in runner.simulation.elevators)
+    assert runner.simulation.assignments == []
