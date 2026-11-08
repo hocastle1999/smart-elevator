@@ -16,6 +16,8 @@ class ServerSettings:
     max_connections: int = 100
     calls_per_window: int = 10
     rate_window_ms: int = 10_000
+    # 운행 기록을 DB에 묶어서 저장하는 간격 (DB_ENABLED일 때만)
+    record_flush_ms: int = 5000
     # False면 시작할 때 루프를 돌리지 않는다 (테스트에서 tick을 직접 부를 때)
     run_loop: bool = True
 

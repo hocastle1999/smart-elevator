@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import logging
 
+from app.db.recorder import LiveRecorder
 from app.server.broadcast import Broadcaster
 from app.server.schemas import StateSnapshot, snapshot_of
 from app.server.settings import ServerSettings
@@ -22,14 +23,22 @@ logger = logging.getLogger(__name__)
 
 
 class SimulationRunner:
-    def __init__(self, settings: ServerSettings, broadcaster: Broadcaster) -> None:
+    def __init__(
+        self,
+        settings: ServerSettings,
+        broadcaster: Broadcaster,
+        recorder: LiveRecorder | None = None,
+    ) -> None:
         self.settings = settings
         self.broadcaster = broadcaster
+        # 운행 기록 저장 (5단계). DB가 없으면 None이고, 시뮬레이션은 그대로 돈다.
+        self.recorder = recorder
         self.simulation = Simulation(
             Building(num_floors=settings.num_floors), num_elevators=settings.num_elevators
         )
         self.lagged_ticks = 0  # 제시간에 돌지 못한 tick 수 (서버 과부하 지표)
         self._task: asyncio.Task[None] | None = None
+        self._flush_task: asyncio.Task[None] | None = None
 
     @property
     def is_running(self) -> bool:
@@ -41,6 +50,14 @@ class SimulationRunner:
     def tick_once(self) -> None:
         """시뮬레이션을 한 tick 진행하고 모든 접속자에게 새 상태를 보낸다."""
         self.simulation.step(self.settings.sim_ms_per_tick)
+        # 오래 도는 서버라 기록을 쌓아 두지 않는다: 상태 변화는 저장 버퍼로 옮기거나(DB가 있으면)
+        # 버리고, 배차 기록도 비운다. 그대로 두면 메모리가 끝없이 늘어난다.
+        if self.recorder is not None and self.recorder.run_id is not None:
+            self.recorder.collect(self.simulation)
+        else:
+            for car in self.simulation.elevators:
+                car.drain_history()
+        self.simulation.assignments.clear()
         # 접속자가 몇 명이든 직렬화는 한 번만 한다.
         self.broadcaster.publish(self.snapshot().model_dump_json())
 
@@ -70,14 +87,57 @@ class SimulationRunner:
                 delay = 0
             await asyncio.sleep(delay)
 
+    # ------------------------------------------------------------------ 운행 기록 저장
+
+    async def start_recording(self) -> None:
+        """실시간 실행을 DB에 만들고 주기적 저장을 시작한다.
+
+        DB에 접속할 수 없으면 기록 없이 시뮬레이션만 돈다. 데모가 DB 장애로 멈추면 안 되기 때문이다.
+        """
+        if self.recorder is None:
+            return
+        try:
+            await asyncio.to_thread(self.recorder.start_run, self.simulation)
+        except Exception as e:
+            logger.exception("운행 기록을 시작하지 못했습니다. 기록 없이 진행합니다.")
+            self.recorder.last_error = repr(e)
+            return
+        self._flush_task = asyncio.create_task(self._flush_forever(), name="recorder-flush")
+
+    async def _flush_forever(self) -> None:
+        while True:
+            await asyncio.sleep(self.settings.record_flush_ms / 1000)
+            await self.flush()
+
+    async def flush(self) -> None:
+        """버퍼의 기록을 저장한다. DB 쓰기는 스레드에서 해서 이벤트 루프를 막지 않는다."""
+        recorder = self.recorder
+        if recorder is None or recorder.run_id is None:
+            return
+        rows = recorder.take()  # 루프 스레드에서 꺼낸다. 이후 쌓이는 기록은 새 버퍼로 간다.
+        if not rows:
+            return
+        try:
+            await asyncio.to_thread(recorder.write, rows, self.simulation.now_ms)
+            recorder.last_error = None
+        except Exception as e:
+            # DB가 잠시 죽어도 시뮬레이션은 계속 돈다. 기록은 버퍼로 되돌려 다음에 다시 시도한다.
+            logger.warning("운행 기록 저장 실패, 다음에 다시 시도합니다: %r", e)
+            recorder.give_back(rows)
+            recorder.last_error = repr(e)
+
+    # ------------------------------------------------------------------ 시작과 정지
+
     def start(self) -> None:
         if not self.is_running:
             self._task = asyncio.create_task(self.run(), name="simulation-loop")
 
     async def stop(self) -> None:
-        if self._task is None:
-            return
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await self._task
-        self._task = None
+        for task in (self._task, self._flush_task):
+            if task is None:
+                continue
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        self._task = self._flush_task = None
+        await self.flush()  # 남은 기록을 마지막으로 저장한다

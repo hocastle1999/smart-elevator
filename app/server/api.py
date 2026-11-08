@@ -48,6 +48,19 @@ async def health(request: Request, response: Response) -> dict:
         "sim_time_ms": runner.simulation.now_ms,
         "viewers": runner.broadcaster.count,
         "lagged_ticks": runner.lagged_ticks,
+        "recording": _recording_status(runner),
+    }
+
+
+def _recording_status(runner: SimulationRunner) -> dict | None:
+    recorder = runner.recorder
+    if recorder is None:
+        return None
+    return {
+        "run_id": recorder.run_id,
+        "written_events": recorder.written,
+        "dropped_events": recorder.dropped,
+        "last_error": recorder.last_error,
     }
 
 
