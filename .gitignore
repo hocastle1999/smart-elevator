@@ -13,3 +13,6 @@ __pycache__/
 .idea/
 Thumbs.db
 .DS_Store
+
+# 비밀번호가 들어간 로컬 전용 SQL
+*.local.sql
